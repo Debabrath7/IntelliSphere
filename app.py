@@ -74,7 +74,7 @@ if section == "🏠 Home":
         company insights, tech trends, research papers, job skill forecasts, 
         and market sentiment — powered by data & intelligence.  
 
-        Built with ❤️ by **Debabrath (B.Tech Final Year)** 
+        Built with ❤️ by **Debabrath** 
     """)
     st.image(
         "https://miro.medium.com/v2/resize:fit:1100/format:webp/1*0ZrJ6x8r9KxZxB1ITlmN_Q.png",
@@ -86,77 +86,92 @@ if section == "🏠 Home":
 # 💹 STOCK INSIGHTS
 # -----------------------------------------------------
 elif section == "💹 Stock Insights":
-    st.header("📈 Stock Market Insights")
+    st.header("Stock Market Insights")
 
     user_input = st.text_input("Enter Company Name or Symbol:", "TCS")
-    period = st.selectbox("Select Time Range:", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=2)
+    period = st.selectbox("Select Time Range:", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=2)
 
     if st.button("Get Stock Data"):
-        ticker = user_input.strip().upper()
-        if "." not in ticker:
-            ticker += ".NS"  # Default to NSE for India
+        ticker_raw = user_input.strip().upper()
+        ticker = ticker_raw if "." in ticker_raw else ticker_raw + ".NS"  # backend ticker
+        display_name = ticker_raw  # shown name (no .NS)
 
         try:
             stock = yf.Ticker(ticker)
-            df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+            df = yf.download(ticker, period=period, interval="1h" if period in ["1d", "5d"] else "1d",
+                             progress=False, auto_adjust=True)
 
             if df is None or df.empty:
-                st.error("⚠️ No data available for this ticker. Try again later.")
+                st.error("⚠️ No data available. Try a different stock.")
             else:
-                # --- Flatten and clean columns (fixes multi-index bug) ---
+                # Flatten MultiIndex columns
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [
-                        "_".join(col).strip() if isinstance(col, tuple) else col for col in df.columns
-                    ]
-                    df.rename(
-                        columns={
-                            f"Close_{ticker}": "Close",
-                            f"Open_{ticker}": "Open",
-                            f"High_{ticker}": "High",
-                            f"Low_{ticker}": "Low",
-                            f"Volume_{ticker}": "Volume",
-                        },
-                        inplace=True,
-                    )
-
-                # --- Reset index to ensure 'Date' exists ---
+                    df.columns = ['_'.join(col).strip() for col in df.columns]
+                    df.rename(columns={f"Close_{ticker}": "Close"}, inplace=True)
                 df_recent = df.reset_index()
 
-                if "Date" not in df_recent.columns or "Close" not in df_recent.columns:
-                    st.error("⚠️ Unexpected data format. Please try another stock.")
-                else:
-                    # --- Metrics ---
-                    info = stock.info
-                    latest_price = round(df_recent["Close"].iloc[-1], 2)
-                    first_price = round(df_recent["Close"].iloc[0], 2)
-                    change = round(((latest_price - first_price) / first_price) * 100, 2)
+                info = stock.info
+                latest_price = round(df_recent["Close"].iloc[-1], 2)
+                first_price = round(df_recent["Close"].iloc[0], 2)
+                change = round(((latest_price - first_price) / first_price) * 100, 2)
 
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric(f"{ticker}", f"₹{latest_price}", f"{change}%")
-                    c2.metric("P/E Ratio", info.get("trailingPE", "N/A"))
-                    c3.metric("Market Cap", f"{info.get('marketCap', 'N/A'):,}" if info.get("marketCap") else "N/A")
+                pe_ratio = info.get("trailingPE", "N/A")
+                market_cap = info.get("marketCap", 0)
+                market_cap_crore = round(market_cap / 1e7, 2) if market_cap else "N/A"
+                high_52w = info.get("fiftyTwoWeekHigh", "N/A")
+                low_52w = info.get("fiftyTwoWeekLow", "N/A")
+                day_high = info.get("dayHigh", "N/A")
+                day_low = info.get("dayLow", "N/A")
+                volume = info.get("volume", "N/A")
+                dividend_yield = info.get("dividendYield", "N/A")
+                earnings_next = info.get("earningsTimestampStart", "N/A")
+                earnings_last = info.get("earningsTimestamp", "N/A")
 
-                    c4, c5, c6 = st.columns(3)
-                    c4.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
-                    c5.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
-                    c6.metric("Volume", info.get("volume", "N/A"))
+                # Display metrics neatly
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"{display_name}", f"₹{latest_price}", f"{change}%")
+                c2.metric("P/E Ratio", pe_ratio)
+                c3.metric("Market Cap (₹ Cr)", market_cap_crore)
 
-                    # --- Safe chart rendering ---
-                    try:
-                        fig = px.line(
-                            df_recent,
-                            x="Date",
-                            y="Close",
-                            title=f"{ticker} Price Trend ({period})",
-                            markers=True,
-                        )
-                        fig.update_layout(template="plotly_dark", title_x=0.5)
-                        st.plotly_chart(fig, use_container_width=True)
-                    except Exception as chart_error:
-                        st.warning(f"⚠️ Chart rendering failed: {chart_error}")
+                c4, c5, c6 = st.columns(3)
+                c4.metric("52W High", high_52w)
+                c5.metric("52W Low", low_52w)
+                c6.metric("Volume", volume)
+
+                c7, c8, c9 = st.columns(3)
+                c7.metric("Today's High", day_high)
+                c8.metric("Today's Low", day_low)
+                c9.metric("Dividend Yield", dividend_yield)
+
+                # Earnings info
+                if earnings_next != "N/A":
+                    st.info(f"Next Earnings Announcement: **{pd.to_datetime(earnings_next, unit='s').date()}**")
+                elif earnings_last != "N/A":
+                    st.info(f"Last Earnings Declared: **{pd.to_datetime(earnings_last, unit='s').date()}**")
+
+                # Interactive chart (smooth curve)
+                try:
+                    fig = px.line(
+                        df_recent,
+                        x="Date",
+                        y="Close",
+                        title=f"{display_name} Price Trend ({period})",
+                        markers=True
+                    )
+                    fig.update_traces(line_shape="spline")
+                    fig.update_layout(
+                        template="plotly_dark",
+                        xaxis_title="Date",
+                        yaxis_title="Price (₹)",
+                        title_x=0.5,
+                        margin=dict(l=20, r=20, t=40, b=20)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"⚠️ Chart rendering failed: {e}")
 
         except Exception as e:
-            st.error(f"❌ Failed to fetch stock data: {e}")
+            st.error(f"❌ Could not fetch stock data. Details: {e}")
 
 # -----------------------------------------------------
 # 💻 TECH & STARTUP TRENDS
@@ -170,7 +185,7 @@ elif section == "💻 Tech & Startup Trends":
         repos = fetch_github_trending(lang)
         if repos:
             for r in repos[:10]:
-                st.markdown(f"### [{r['name']}]({'https://github.com/' + r['name']}) ⭐ {r['stars']}")
+                st.markdown(f"### [{r['name']}]({'https://github.com/' + r['name']}) {r['stars']}")
                 st.caption(r['description'] or "_No description available_")
                 st.divider()
         else:
@@ -281,6 +296,7 @@ elif section == "💬 Feedback":
 # -----------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.info(f"Developed by **Debabrath** | Last Updated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
 
 
 
