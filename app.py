@@ -94,45 +94,69 @@ elif section == "💹 Stock Insights":
     if st.button("Get Stock Data"):
         ticker = user_input.strip().upper()
         if "." not in ticker:
-            ticker += ".NS"  # Default to NSE stocks for India
+            ticker += ".NS"  # Default to NSE for India
 
         try:
             stock = yf.Ticker(ticker)
             df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
 
-            # 🔍 Check if data exists
-            # Flatten multi-index columns if present
-if isinstance(df.columns, pd.MultiIndex):
-    df.columns = ['_'.join(col).strip() if isinstance(col, tuple) else col for col in df.columns]
-    # Rename standardized column names
-    df.rename(columns={
-        f'Close_{ticker}': 'Close',
-        f'Open_{ticker}': 'Open',
-        f'High_{ticker}': 'High',
-        f'Low_{ticker}': 'Low',
-        f'Volume_{ticker}': 'Volume'
-    }, inplace=True)
+            if df is None or df.empty:
+                st.error("⚠️ No data available for this ticker. Try again later.")
+            else:
+                # --- Flatten and clean columns (fixes multi-index bug) ---
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [
+                        "_".join(col).strip() if isinstance(col, tuple) else col for col in df.columns
+                    ]
+                    df.rename(
+                        columns={
+                            f"Close_{ticker}": "Close",
+                            f"Open_{ticker}": "Open",
+                            f"High_{ticker}": "High",
+                            f"Low_{ticker}": "Low",
+                            f"Volume_{ticker}": "Volume",
+                        },
+                        inplace=True,
+                    )
 
-# Reset index to ensure 'Date' column exists
-df_recent = df.reset_index()
+                # --- Reset index to ensure 'Date' exists ---
+                df_recent = df.reset_index()
 
-# Now verify
-if "Date" not in df_recent.columns or "Close" not in df_recent.columns:
-    st.error("⚠️ Data format unexpected. Please try another ticker.")
-else:
-    # --- Plot chart safely ---
-    try:
-        fig = px.line(
-            df_recent,
-            x="Date",
-            y="Close",
-            title=f"{ticker} Price Trend ({period})",
-            markers=True
-        )
-        fig.update_layout(template="plotly_dark", title_x=0.5)
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.warning(f"Chart rendering failed: {e}")
+                if "Date" not in df_recent.columns or "Close" not in df_recent.columns:
+                    st.error("⚠️ Unexpected data format. Please try another stock.")
+                else:
+                    # --- Metrics ---
+                    info = stock.info
+                    latest_price = round(df_recent["Close"].iloc[-1], 2)
+                    first_price = round(df_recent["Close"].iloc[0], 2)
+                    change = round(((latest_price - first_price) / first_price) * 100, 2)
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric(f"{ticker}", f"₹{latest_price}", f"{change}%")
+                    c2.metric("P/E Ratio", info.get("trailingPE", "N/A"))
+                    c3.metric("Market Cap", f"{info.get('marketCap', 'N/A'):,}" if info.get("marketCap") else "N/A")
+
+                    c4, c5, c6 = st.columns(3)
+                    c4.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
+                    c5.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
+                    c6.metric("Volume", info.get("volume", "N/A"))
+
+                    # --- Safe chart rendering ---
+                    try:
+                        fig = px.line(
+                            df_recent,
+                            x="Date",
+                            y="Close",
+                            title=f"{ticker} Price Trend ({period})",
+                            markers=True,
+                        )
+                        fig.update_layout(template="plotly_dark", title_x=0.5)
+                        st.plotly_chart(fig, use_container_width=True)
+                    except Exception as chart_error:
+                        st.warning(f"⚠️ Chart rendering failed: {chart_error}")
+
+        except Exception as e:
+            st.error(f"❌ Failed to fetch stock data: {e}")
 
 # -----------------------------------------------------
 # 💻 TECH & STARTUP TRENDS
@@ -257,5 +281,6 @@ elif section == "💬 Feedback":
 # -----------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.info(f"Developed by **Debabrath** | Last Updated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
 
 
