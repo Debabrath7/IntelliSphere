@@ -1,0 +1,10 @@
+streamlit
+pandas
+requests
+yfinance
+beautifulsoup4
+lxml
+pytrends
+transformers
+torch
+plotly
