@@ -75,13 +75,48 @@ if section == "🏠 Home":
 elif section == "💹 Stock Insights":
     st.header("📈 Stock Market Insights")
     ticker = st.text_input("Enter stock ticker (e.g., TCS.NS, INFY.NS):", "TCS.NS")
+
+    # Optionally add a period selector for more interactivity
+    period = st.selectbox("Select time period:", ["1mo", "3mo", "6mo", "1y", "2y"], index=2)
+
     if st.button("Get Stock Data"):
-        s = stock_summary(ticker)
+        s = stock_summary(ticker)  # You can modify this later to accept 'period'
         if s:
             st.metric(label=f"{ticker} Latest Close", value=f"₹{s['latest_close']:.2f}")
             st.metric(label="6-Month Change (%)", value=f"{s['pct_change_6mo']:.2f}%")
-            fig = px.line(s["recent"], x="Date", y="Close", title=f"{ticker} - Last 30 Days Performance")
+
+            # ✅ FIX: Ensure date is a column for plotting
+            df_recent = s["recent"]
+            if "Date" not in df_recent.columns:
+                df_recent = df_recent.reset_index()
+
+            # Dynamically detect the correct date column name
+            date_col = None
+            for col in df_recent.columns:
+                if "date" in col.lower():
+                    date_col = col
+                    break
+            if date_col is None:
+                date_col = df_recent.columns[0]
+
+            # ✅ Plot the chart safely
+            fig = px.line(
+                df_recent,
+                x=date_col,
+                y="Close",
+                title=f"{ticker} - Last 30 Days Performance",
+                markers=True
+            )
+            fig.update_traces(line=dict(width=2))
+            fig.update_layout(
+                template="plotly_dark",
+                xaxis_title="Date",
+                yaxis_title="Stock Price (₹)",
+                title_x=0.5,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
             st.plotly_chart(fig, use_container_width=True)
+
         else:
             st.error("⚠️ No data found for that ticker.")
 
@@ -193,3 +228,4 @@ elif section == "💬 Feedback":
 # -----------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.info("Developed by **Debabrath** | Final Year B.Tech Project")
+
