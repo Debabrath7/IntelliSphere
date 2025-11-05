@@ -85,8 +85,11 @@ if section == "🏠 Home":
 # -----------------------------------------------------
 # 💹 STOCK INSIGHTS
 # -----------------------------------------------------
+# -----------------------------------------------------
+# 💹 STOCK INSIGHTS
+# -----------------------------------------------------
 elif section == "💹 Stock Insights":
-    st.header("Stock Market Insights")
+    st.header("📈 Stock Market Insights")
 
     user_input = st.text_input("Enter Company Name or Symbol:", "TCS")
     period = st.selectbox("Select Time Range:", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=2)
@@ -94,64 +97,58 @@ elif section == "💹 Stock Insights":
     if st.button("Get Stock Data"):
         ticker = user_input.strip().upper()
         if "." not in ticker:
-            ticker += ".NS"
+            ticker += ".NS"  # Default to NSE stocks for India
 
-        stock = yf.Ticker(ticker)
-        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+        try:
+            stock = yf.Ticker(ticker)
+            df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
 
-        if not df.empty:
-            info = stock.info
-            latest_price = round(df["Close"].iloc[-1], 2)
-            change = round(((df["Close"].iloc[-1] - df["Close"].iloc[0]) / df["Close"].iloc[0]) * 100, 2)
+            # 🔍 Check if data exists
+            if df is None or df.empty:
+                st.error("⚠️ No data available for this ticker. Try again later.")
+            else:
+                # ✅ Ensure Date column exists
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    st.error("Unexpected data format. Please retry.")
+                else:
+                    df_recent = df.reset_index()
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric(f"{ticker}", f"₹{latest_price}", f"{change}%")
-            c2.metric("P/E Ratio", info.get("trailingPE", "N/A"))
-            c3.metric("Market Cap", f"{info.get('marketCap', 'N/A'):,}" if info.get("marketCap") else "N/A")
+                    # ✅ Check if 'Close' column exists
+                    if "Close" not in df_recent.columns:
+                        st.error("⚠️ Could not find price data. Please try a different ticker.")
+                    else:
+                        # --- Stock metrics ---
+                        info = stock.info
+                        latest_price = round(df_recent["Close"].iloc[-1], 2)
+                        first_price = round(df_recent["Close"].iloc[0], 2)
+                        change = round(((latest_price - first_price) / first_price) * 100, 2)
 
-            c4, c5, c6 = st.columns(3)
-            c4.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
-            c5.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
-            c6.metric("Volume", info.get("volume", "N/A"))
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric(f"{ticker}", f"₹{latest_price}", f"{change}%")
+                        c2.metric("P/E Ratio", info.get("trailingPE", "N/A"))
+                        c3.metric("Market Cap", f"{info.get('marketCap', 'N/A'):,}" if info.get("marketCap") else "N/A")
 
-            df_recent = df.reset_index()
-            fig = px.line(df_recent, x="Date", y="Close", title=f"{ticker} Price Trend ({period})", markers=True)
-            fig.update_layout(template="plotly_dark", title_x=0.5)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("⚠️ Could not fetch data. Try again later.")
+                        c4, c5, c6 = st.columns(3)
+                        c4.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
+                        c5.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
+                        c6.metric("Volume", info.get("volume", "N/A"))
 
-# -----------------------------------------------------
-# 🤖 AI COMPANY INSIGHTS
-# -----------------------------------------------------
-elif section == "🤖 AI Company Insights":
-    st.header("AI Company Insights Dashboard")
-    company = st.text_input("Enter company name:", "Infosys")
+                        # --- Plot chart safely ---
+                        try:
+                            fig = px.line(
+                                df_recent,
+                                x="Date",
+                                y="Close",
+                                title=f"{ticker} Price Trend ({period})",
+                                markers=True
+                            )
+                            fig.update_layout(template="plotly_dark", title_x=0.5)
+                            st.plotly_chart(fig, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"Chart rendering failed: {e}")
 
-    if st.button("Analyze Company"):
-        ticker = company.upper().strip()
-        if "." not in ticker:
-            ticker += ".NS"
-        stock = yf.Ticker(ticker)
-        info = stock.info
-
-        st.subheader(f"{info.get('longName', company)} Overview")
-        st.write(info.get("longBusinessSummary", "No detailed description available."))
-
-        st.divider()
-        st.subheader("Company Metrics")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Sector", info.get("sector", "N/A"))
-        col2.metric("Industry", info.get("industry", "N/A"))
-        col3.metric("Employees", info.get("fullTimeEmployees", "N/A"))
-
-        col4, col5, col6 = st.columns(3)
-        col4.metric("P/E Ratio", info.get("trailingPE", "N/A"))
-        col5.metric("Profit Margin", info.get("profitMargins", "N/A"))
-        col6.metric("Return on Equity", info.get("returnOnEquity", "N/A"))
-
-        if info.get("website"):
-            st.markdown(f" [Official Website]({info['website']})")
+        except Exception as e:
+            st.error(f"❌ Failed to fetch data for {ticker}: {e}")
 
 # -----------------------------------------------------
 # 💻 TECH & STARTUP TRENDS
@@ -276,3 +273,4 @@ elif section == "💬 Feedback":
 # -----------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.info(f"Developed by **Debabrath** | Last Updated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
+
