@@ -1,10 +1,10 @@
 streamlit
-pandas
-requests
 yfinance
+pandas
+plotly
+requests
 beautifulsoup4
-lxml
 pytrends
 transformers
+feedparser
 torch
-plotly
