@@ -4,6 +4,11 @@
 # ==============================================
 
 import streamlit as st
+import sys, os
+
+# ✅ Ensure Python can find 'frontend.py' even on Streamlit Cloud or mounted paths
+sys.path.append(os.path.dirname(__file__))
+
 from frontend import render_dashboard
 
 # -----------------------------------------------------
