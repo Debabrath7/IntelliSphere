@@ -1,14 +1,13 @@
-# frontend.py
-# Dark Neon frontend for IntelliSphere
-# Author: Generated for Debabrath
+# ==============================================
+# IntelliSphere Frontend UI (Dark Neon Edition)
+# Author: Debabrath
+# ==============================================
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
 from backend_modules import (
-    get_stock_data,
-    get_stock_info if False else None,  # placeholder: info fetched via yfinance in get_stock_data or separate call
     fetch_github_trending,
     fetch_arxiv_papers,
     get_trends_keywords,
@@ -18,10 +17,19 @@ from backend_modules import (
 )
 import backend_modules as bm  # use optimized functions directly
 
-# ---------- Page config ----------
-st.set_page_config(page_title="IntelliSphere", page_icon="🌐", layout="wide", initial_sidebar_state="collapsed")
+# -----------------------------------------------------
+# PAGE CONFIG
+# -----------------------------------------------------
+st.set_page_config(
+    page_title="IntelliSphere",
+    page_icon="🌐",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-# ---------- GLOBALS & UTILS ----------
+# -----------------------------------------------------
+# NAV ITEMS
+# -----------------------------------------------------
 NAV_ITEMS = [
     ("Home", "home"),
     ("Stock Insights", "stock"),
@@ -32,338 +40,234 @@ NAV_ITEMS = [
     ("Feedback", "feedback"),
 ]
 
-def _nav_button(label, key, active_key):
-    """Render a nav button styled for the neon header. Returns True if clicked."""
-    is_active = (active_key == key)
-    cls = "nav-item active" if is_active else "nav-item"
-    html = f"""
-    <div class="{cls}" onclick="window._stNav='{key}';window.parent.postMessage({{'streamlit':true}}, '*')">
-        {label}
-    </div>
-    """
-    return st.markdown(html, unsafe_allow_html=True)
-
-def set_nav_state(key):
-    st.session_state["nav"] = key
-
+# Initialize session state
 if "nav" not in st.session_state:
     st.session_state["nav"] = "home"
 
-# ---------- STYLES (Dark Neon) ----------
+# -----------------------------------------------------
+# CUSTOM STYLING (Dark Neon Theme)
+# -----------------------------------------------------
 st.markdown(
     """
     <style>
-    /* page background */
-    .stApp {{
-        background: radial-gradient(ellipse at top left, #071021 0%, #05060a 35%, #020203 100%);
-        color: #e6f7ff;
+    .stApp {
+        background: radial-gradient(circle at 10% 20%, #0a0f29 0%, #04060d 90%);
+        color: #eafcff;
         font-family: 'Inter', sans-serif;
-    }}
-
-    /* top nav bar */
-    .topbar {{
-        position: sticky;
-        top: 0;
-        z-index: 999;
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        gap:12px;
-        padding:12px 32px;
-        background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
-        border-bottom: 1px solid rgba(255,255,255,0.03);
-        backdrop-filter: blur(6px);
-    }}
-    .brand {{
-        display:flex;
-        align-items:center;
-        gap:12px;
-    }}
-    .logo {{
-        width:44px;height:44px;border-radius:10px;
-        background: linear-gradient(135deg,#00e6ff 0%, #7a00ff 100%);
-        box-shadow: 0 6px 20px rgba(0, 230, 255, 0.12), 0 1px 0 rgba(255,255,255,0.04) inset;
-        display:flex;align-items:center;justify-content:center;
-        font-weight:700;color:#021; font-size:18px;
-    }}
-    .brand h1 {{ margin:0; font-size:18px; color: #a8f0ff; letter-spacing:0.4px; }}
-    .nav {{
-        display:flex; gap:10px; align-items:center;
-    }}
-    .nav-item {{
-        padding:8px 14px; border-radius:999px; cursor:pointer;
-        color: #cbeefc; font-weight:600; font-size:13px;
-        transition: all 0.18s ease;
-        border: 1px solid transparent;
-    }}
-    .nav-item:hover {{
-        transform: translateY(-2px);
-        box-shadow: 0 6px 18px rgba(0,230,255,0.06);
-    }}
-    .nav-item.active {{
-        background: linear-gradient(90deg, rgba(0,230,255,0.08), rgba(122,0,255,0.06));
-        border: 1px solid rgba(0,230,255,0.12);
-        box-shadow: 0 8px 30px rgba(0,230,255,0.06);
-        color: #eaffff;
-    }}
-
-    /* page sections and cards */
-    .section {{
-        padding: 28px 40px;
-    }}
-    .glass-card {{
-        background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
-        border: 1px solid rgba(255,255,255,0.03);
-        border-radius: 12px;
-        padding: 18px;
-        box-shadow: 0 6px 30px rgba(3,8,23,0.6);
-    }}
-
-    /* small tweaks */
-    .metric-custom .stMetricLabel {{ color:#9feafc; }}
-    .metric-custom .stMetricValue {{ color:#00e6d4; font-weight:700; }}
-
-    /* mobile responsiveness */
-    @media (max-width: 768px) {{
-        .topbar {{ padding: 12px; flex-direction:column; gap:8px; align-items:flex-start; }}
-        .nav {{ flex-wrap:wrap; gap:6px; }}
-    }}
+    }
+    h1, h2, h3, h4 {
+        color: #00e6ff !important;
+        text-shadow: 0 0 8px rgba(0, 230, 255, 0.5);
+    }
+    div.stButton > button {
+        background: linear-gradient(90deg, #00e6ff, #7a00ff);
+        color: white;
+        border-radius: 8px;
+        border: none;
+        font-weight: 600;
+        transition: 0.3s ease;
+    }
+    div.stButton > button:hover {
+        box-shadow: 0 0 12px rgba(0, 230, 255, 0.6);
+        transform: scale(1.02);
+    }
+    .stTextInput>div>div>input, .stTextArea>div>div>textarea {
+        background-color: #121a2b !important;
+        color: #eafcff !important;
+        border-radius: 10px;
+    }
+    div[data-testid="stMetricValue"] { color: #00e6d4; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { color: #9feafc; }
+    footer { visibility: hidden; }
+    hr {
+        border: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #00e6ff, transparent);
+        margin: 1rem 0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ---------- TOP NAVBAR ----------
-topbar = st.container()
-with topbar:
-    # build html container for brand + nav and simple JS to set session nav
+# -----------------------------------------------------
+# NAVIGATION BAR (TOP)
+# -----------------------------------------------------
+def navbar():
     st.markdown(
-        f"""
-        <div class="topbar">
-            <div class="brand">
-                <div class="logo">IS</div>
-                <div>
-                    <h1>IntelliSphere</h1>
-                    <div style="font-size:11px;color:#7fdcff;margin-top:2px">AI-Powered Insight Dashboard</div>
-                </div>
-            </div>
-            <div class="nav" id="nav">
-                {"".join([f'<div class="nav-item {"active" if st.session_state["nav"]==key else "" }" onclick="document.cookie = \"_is_nav={key}; path=/\"">{label}</div>' for label,key in NAV_ITEMS])}
-            </div>
+        """
+        <div style='display:flex;justify-content:center;gap:10px;margin-bottom:20px;flex-wrap:wrap;'>
+            <a href='/?page=home' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>🏠 Home</button></a>
+            <a href='/?page=stock' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>💹 Stocks</button></a>
+            <a href='/?page=trends' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>💻 Trends</button></a>
+            <a href='/?page=research' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>📚 Research</button></a>
+            <a href='/?page=skills' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>🔍 Skills</button></a>
+            <a href='/?page=news' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>📰 News</button></a>
+            <a href='/?page=feedback' target='_self'><button style='padding:8px 18px;border-radius:999px;background:#121a2b;color:#00e6ff;border:1px solid #00e6ff;'>💬 Feedback</button></a>
         </div>
-        <script>
-        // read cookie nav and push to location hash so Streamlit can see it on re-run
-        const setNavCookie = () => {{
-            const navItems = document.querySelectorAll('.nav-item');
-            navItems.forEach(it => {{
-                it.addEventListener('click', () => {{
-                    const text = it.innerText.trim();
-                    const keyMap = { {label:key for (label,key) in NAV_ITEMS} };
-                    // create a mapping for labels to keys in JS-friendly format
-                }});
-            }});
-        }};
-        </script>
         """,
         unsafe_allow_html=True,
     )
 
-# NOTE: We will use simple buttons below to control navigation (safer/reliable with Streamlit)
-cols = st.columns([1, 8, 1])
-with cols[1]:
-    nav_row = st.columns(len(NAV_ITEMS))
-    for i, (label, key) in enumerate(NAV_ITEMS):
-        clicked = nav_row[i].button(label, key=f"nav_{key}")
-        if clicked:
-            set_nav_state(key)
-
-# ---------- SECTION RENDERERS ----------
+# -----------------------------------------------------
+# SECTIONS
+# -----------------------------------------------------
 def render_home():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
-    st.subheader("Welcome to IntelliSphere")
-    st.markdown(
-        """
-        **IntelliSphere** is a modular AI dashboard built for fast insights — stocks, trends,
-        research, and news — wrapped in a modern Dark Neon theme.
-        """
+    st.title("🌐 IntelliSphere: AI-Powered Insight Platform")
+    st.write("""
+        Welcome to **IntelliSphere**, your all-in-one AI dashboard for 
+        real-time stock analysis, tech trends, research, and market sentiment — 
+        crafted in a sleek Dark Neon theme.  
+    """)
+    st.image(
+        "https://miro.medium.com/v2/resize:fit:1100/format:webp/1*0ZrJ6x8r9KxZxB1ITlmN_Q.png",
+        use_container_width=True
     )
-    st.divider()
-    c1, c2, c3 = st.columns([3,2,2])
-    c1.markdown("### Quick Actions")
-    if c1.button("Get Sample Stock (TCS)"):
-        st.session_state["nav"] = "stock"
-    c1.markdown("- Fast, cached data\n- Neon-styled charts\n- Portfolio-friendly layout")
-    c2.metric("Active Modules", "6")
-    c3.metric("Last Update", datetime.now().strftime("%d %b %Y, %I:%M %p"))
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
+    st.success("✅ All systems operational!")
 
 def render_stock():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
     st.header("💹 Stock Insights")
-    user_input = st.text_input("Company symbol (eg. TCS / TCS.NS):", "TCS")
-    period = st.selectbox("Time range:", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=4)
-    if st.button("Fetch Stock"):
-        ticker_raw = user_input.strip().upper()
-        ticker = ticker_raw if "." in ticker_raw else ticker_raw + ".NS"
-        with st.spinner("Fetching data..."):
-            df = bm.get_stock_data(ticker, period=period, interval="1h" if period in ["1d","5d"] else "1d")
-            try:
-                info = bm.yf.Ticker(ticker).info
-            except Exception:
-                info = {}
-        if df is None or df.empty:
-            st.error("No data available.")
+    user_input = st.text_input("Enter Company Name or Symbol:", "TCS")
+    period = st.selectbox("Select Time Range:", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=2)
+
+    if st.button("Get Stock Data"):
+        ticker = user_input.strip().upper()
+        if "." not in ticker:
+            ticker += ".NS"
+        df = bm.get_stock_data(ticker, period=period)
+        if df is None:
+            st.error("⚠️ No data available. Try a different stock.")
         else:
-            latest = round(float(df["Close"].iloc[-1]),2)
-            first = round(float(df["Close"].iloc[0]),2)
-            change = round((latest-first)/first*100,2) if first else 0.0
-            col1, col2, col3 = st.columns(3)
-            col1.metric(f"{ticker_raw}", f"₹{latest}", f"{change}%")
-            col2.metric("52W High", info.get("fiftyTwoWeekHigh","N/A"))
-            col3.metric("52W Low", info.get("fiftyTwoWeekLow","N/A"))
-
-            # interactive plot
-            fig = px.line(df, x="Date", y="Close", title=f"{ticker_raw} price ({period})", markers=True)
+            info = bm.yf.Ticker(ticker).info
+            latest = round(df["Close"].iloc[-1], 2)
+            first = round(df["Close"].iloc[0], 2)
+            change = round(((latest - first) / first) * 100, 2)
+            c1, c2, c3 = st.columns(3)
+            c1.metric(f"{user_input.upper()}", f"₹{latest}", f"{change}%")
+            c2.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
+            c3.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
+            fig = px.line(df, x="Date", y="Close", title=f"{user_input.upper()} Price Trend ({period})", markers=True)
             fig.update_traces(line_shape="spline")
-            fig.update_layout(template="plotly_dark", margin=dict(t=50,b=20))
+            fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
             st.plotly_chart(fig, use_container_width=True)
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
 
 def render_trends():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
     st.header("💻 Tech & Startup Trends")
-    lang = st.text_input("Language / Topic (eg. python):", "python")
-    if st.button("Fetch Trending Repos"):
-        with st.spinner("Fetching trending repos..."):
-            repos = bm.fetch_github_trending(lang)
+    lang = st.text_input("Enter language (e.g., Python, Java):", "python")
+    if st.button("Fetch Trending Repositories"):
+        repos = fetch_github_trending(lang)
         if repos:
-            for r in repos[:8]:
-                st.markdown(f"**[{r['name']}]**  \n{r['description']}")
-                st.caption(f"Stars: {r.get('stars','0')}")
+            for r in repos[:10]:
+                st.markdown(f"### [{r['name']}]({'https://github.com/' + r['name']}) ⭐ {r['stars']}")
+                st.caption(r['description'] or "_No description available_")
                 st.divider()
         else:
-            st.warning("No trending repos found.")
-    st.divider()
-    st.subheader("Startup News (sentiment)")
-    try:
-        news = bm.get_news("startup OR funding OR venture capital India", max_items=6)
-        sentiment = bm.analyze_headlines_sentiment(news)
-        for n in sentiment:
-            st.markdown(f"**{n['title']}**")
-            st.caption(f"Sentiment: {n['sentiment']['label']} ({n['sentiment']['score']:.2f})")
-            st.divider()
-    except Exception as e:
-        st.warning("Could not fetch startup news.")
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
+            st.warning("No trending repositories found right now.")
+    st.subheader("🚀 Startup News")
+    startup_news = get_news("startup OR funding OR venture capital India", max_items=6)
+    startup_sent = analyze_headlines_sentiment(startup_news)
+    for n in startup_sent:
+        st.markdown(f"**{n['title']}**")
+        if n['link']:
+            st.markdown(f"[Read more]({n['link']})")
+        st.caption(f"Sentiment: {n['sentiment']['label']} ({n['sentiment']['score']:.2f})")
+        st.divider()
 
 def render_research():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
     st.header("📚 Research & Education")
-    topic = st.text_input("Search papers on:", "machine learning")
+    topic = st.text_input("Enter topic:", "machine learning")
     if st.button("Fetch Papers"):
-        with st.spinner("Fetching papers..."):
-            papers = bm.fetch_arxiv_papers(topic, max_results=5)
+        papers = fetch_arxiv_papers(topic, max_results=5)
         for p in papers:
             st.subheader(p["title"])
             st.caption(", ".join(p["authors"]))
-            st.write(p["summary"][:800] + "...")
-            st.markdown(f"[Read more]({p['link']})")
+            st.write(p["summary"])
+            st.markdown(f"[Read Full Paper]({p['link']})")
             st.divider()
-    st.divider()
-    st.subheader("Recommended Courses")
-    recs = bm.recommend_learning_resources(topic)
-    for c in recs.get("courses", []):
-        st.markdown(f"- [{c}]({c})")
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
+    st.subheader("🎓 Recommended Courses")
+    recs = recommend_learning_resources(topic)
+    for link in recs["courses"]:
+        st.markdown(f"- [{link}]({link})")
 
 def render_skills():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
     st.header("🔍 Skill & Job Trends")
-    skills = st.text_input("Enter skills (comma separated):", "Python, SQL, ML")
+    skills = st.text_input("Enter skills (comma-separated):", "Python, Java, SQL")
     if st.button("Analyze"):
         keys = [k.strip() for k in skills.split(",")]
-        with st.spinner("Analyzing trends..."):
-            trends = bm.get_trends_keywords(tuple(keys) if isinstance(keys, list) else keys)
+        trends = get_trends_keywords(keys)
         if trends:
-            df = pd.DataFrame([{"Skill": k, "Change (%)": trends[k]["pct_change"]} for k in keys if k in trends])
-            fig = px.bar(df, x="Skill", y="Change (%)", title="Skill Popularity")
+            df = pd.DataFrame([{"Skill": k, "Change (%)": v["pct_change"]} for k, v in trends.items()])
+            fig = px.bar(df, x="Skill", y="Change (%)", color="Skill", title="Skill Popularity (Last 3 Months)")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Trends currently unavailable.")
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
+            st.warning("⚠️ Google Trends temporarily unavailable.")
 
 def render_news():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
     st.header("📰 News & Sentiment")
-    query = st.text_input("Topic / Company:", "Indian Stock Market")
-    n_items = st.slider("Articles to fetch:", 3, 15, 6)
-    if st.button("Get Live News"):
-        with st.spinner("Fetching news..."):
-            articles = bm.get_news(query, max_items=n_items)
-            sentiments = bm.analyze_headlines_sentiment(articles)
-        if not sentiments:
-            st.warning("No articles found.")
-        else:
-            for art in sentiments:
-                left, right = st.columns([5,1])
-                with left:
-                    st.markdown(f"**{art['title']}**")
-                    if art.get("link"):
-                        st.markdown(f"[Read more]({art['link']})")
-                    st.caption(f"{art['published'].strftime('%b %d, %Y %H:%M')}")
-                with right:
-                    lab = art['sentiment']['label']
-                    sc = art['sentiment']['score']
-                    badge = "🟢" if "POS" in lab else "🔴" if "NEG" in lab else "⚪"
-                    st.markdown(f"**{badge} {lab}**\n\n{sc:.2f}")
-                st.divider()
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
+    query = st.text_input("Enter topic, company, or keyword:", "Indian Stock Market")
+    num_items = st.slider("Number of articles:", 3, 15, 8)
+    if st.button("Get News"):
+        with st.spinner("Fetching latest headlines..."):
+            articles = get_news(query, max_items=num_items)
+            sentiments = analyze_headlines_sentiment(articles)
+            if not sentiments:
+                st.warning("⚠️ No recent articles found.")
+            else:
+                for art in sentiments:
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.markdown(f"### {art['title']}")
+                        if art["link"]:
+                            st.markdown(f"[🔗 Read full article]({art['link']})")
+                        st.caption(f"🕒 {art['published'].strftime('%b %d, %Y %H:%M')}")
+                    with col2:
+                        sentiment = art["sentiment"]["label"]
+                        score = art["sentiment"]["score"]
+                        color = "🟢" if "POS" in sentiment else "🔴" if "NEG" in sentiment else "⚪"
+                        st.markdown(f"**{color} {sentiment} ({score:.2f})**")
+                    st.divider()
 
 def render_feedback():
-    st.markdown("<div class='section'><div class='glass-card'>", unsafe_allow_html=True)
     st.header("💬 Feedback")
-    name = st.text_input("Name")
-    rating = st.slider("Rate (1-5):", 1, 5, 4)
-    comments = st.text_area("Comments")
+    name = st.text_input("Your Name")
+    rating = st.slider("Rate IntelliSphere (1-5):", 1, 5, 4)
+    comments = st.text_area("Your suggestions or thoughts:")
     if st.button("Submit Feedback"):
+        new_entry = {
+            "Name": name,
+            "Rating": rating,
+            "Comments": comments,
+            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
         try:
-            import pandas as pd, os
-            row = {"Name": name, "Rating": rating, "Comments": comments, "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-            if not os.path.exists("feedback.csv"):
-                pd.DataFrame([row]).to_csv("feedback.csv", index=False)
-            else:
-                df = pd.read_csv("feedback.csv")
-                df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-                df.to_csv("feedback.csv", index=False)
-            st.success("Thanks — feedback submitted!")
-        except Exception as e:
-            st.error("Unable to save feedback.")
-    st.markdown("</div></div>", unsafe_allow_html=True)
+            df = pd.read_csv("feedback.csv")
+        except FileNotFoundError:
+            df = pd.DataFrame(columns=["Name", "Rating", "Comments", "Timestamp"])
+        df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
+        df.to_csv("feedback.csv", index=False)
+        st.success("✅ Thank you for your feedback!")
 
-
-# ---------- MAIN RENDER ----------
+# -----------------------------------------------------
+# MAIN RENDER FUNCTION
+# -----------------------------------------------------
 def render_dashboard():
-    st.experimental_memo.clear()  # clears any leftover stale cache on manual reloads
-    nav = st.session_state.get("nav", "home")
-    if nav == "home":
+    query_params = st.query_params
+    page = query_params.get("page", ["home"])[0]
+    navbar()
+
+    if page == "home":
         render_home()
-    elif nav == "stock":
+    elif page == "stock":
         render_stock()
-    elif nav == "trends":
+    elif page == "trends":
         render_trends()
-    elif nav == "research":
+    elif page == "research":
         render_research()
-    elif nav == "skills":
+    elif page == "skills":
         render_skills()
-    elif nav == "news":
+    elif page == "news":
         render_news()
-    elif nav == "feedback":
+    elif page == "feedback":
         render_feedback()
     else:
         render_home()
