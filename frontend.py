@@ -20,16 +20,20 @@ from backend_modules import (
 )
 
 # -------------------- Page config & safe session init --------------------
-st.set_page_config(page_title="IntelliSphere", page_icon="🌐", layout="wide")
-
-def _init_state():
-    if "nav" not in st.session_state: st.session_state["nav"] = "home"
-    if "last_symbol" not in st.session_state: st.session_state["last_symbol"] = None
-    if "last_df" not in st.session_state: st.session_state["last_df"] = None
-    if "last_info" not in st.session_state: st.session_state["last_info"] = None
-    if "last_period" not in st.session_state: st.session_state["last_period"] = None
-    if "tech_cache" not in st.session_state: st.session_state["tech_cache"] = {}
-_init_state()
+# -------------------- Safe session init (put near file top, before navbar is used) --------------------
+# Ensure required session keys exist before any function reads them
+if "nav" not in st.session_state:
+    st.session_state["nav"] = "home"
+if "last_symbol" not in st.session_state:
+    st.session_state["last_symbol"] = None
+if "last_df" not in st.session_state:
+    st.session_state["last_df"] = None
+if "last_info" not in st.session_state:
+    st.session_state["last_info"] = None
+if "last_period" not in st.session_state:
+    st.session_state["last_period"] = None
+if "tech_cache" not in st.session_state:
+    st.session_state["tech_cache"] = {}
 
 # -------------------- Styling: dark neon + boxed cards --------------------
 st.markdown("""
@@ -152,17 +156,33 @@ def compute_roc(series, period=12):
     return series.pct_change(periods=period) * 100
 
 # -------------------- Layout: navbar --------------------
+# -------------------- Robust navbar (replace your current navbar() function with this) --------------------
 def navbar():
-    items = [("Home","home"),("Stocks","stock"),("Trends","trends"),("Research","research"),("Skills","skills"),("News","news"),("Feedback","feedback")]
+    items = [("Home","home"),("Stocks","stock"),("Trends","trends"),
+             ("Research","research"),("Skills","skills"),("News","news"),("Feedback","feedback")]
     st.markdown("<div class='navbar'>", unsafe_allow_html=True)
+
+    # Always create the same number of columns as items to avoid index errors
     cols = st.columns(len(items))
+
+    # use .get to read session_state safely; avoid direct indexing which raises KeyError
+    active_nav = st.session_state.get("nav", "home")
+
     for i,(label,key) in enumerate(items):
-        is_active = (st.session_state["nav"] == key)
-        if cols[i].button(label, key=f"nav_{key}"):
+        # create a unique button key for Streamlit to avoid collisions across reruns
+        btn_key = f"nav_btn_{key}"
+
+        # check if this is active (visual marker)
+        is_active = (active_nav == key)
+
+        # render button - if clicked update nav
+        if cols[i].button(label, key=btn_key):
             st.session_state["nav"] = key
-        # attempt to style active visually by writing an extra small HTML marker
+
+        # optionally show a persistent visual indicator for active item (small dot)
         if is_active:
-            cols[i].markdown(f"<div style='text-align:center;margin-top:4px'><small style='color:#00e6ff'>●</small></div>", unsafe_allow_html=True)
+            cols[i].markdown(f"<div style='text-align:center;margin-top:6px'><small style='color:#00e6ff'>●</small></div>", unsafe_allow_html=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # -------------------- Stock renderer (clean boxed layout) --------------------
