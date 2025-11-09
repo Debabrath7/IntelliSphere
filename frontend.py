@@ -162,15 +162,17 @@ def render_home():
 # STOCKS MODULE
 # -----------------------------------------------------
 def render_stock():
-    st.header("Stock Insights")
+    st.header("💹 Stock Insights")
 
-    symbol = st.text_input("Enter company symbol:", "TCS")
+    # --- Input section ---
+    symbol = st.text_input("Enter company symbol:", st.session_state.get("last_symbol", "TCS"))
     period = st.selectbox("Select time range:", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=2)
     chart_type = st.radio("Chart Type", ["Line", "Candlestick"], horizontal=True)
     show_ema = st.checkbox("Show EMA (12 & 26)", value=True)
     show_rsi = st.checkbox("Show RSI (14)", value=False)
 
-    if st.button("Fetch Stock Data"):
+    # --- Data fetching with session caching ---
+    if st.button("Fetch Stock Data") or symbol != st.session_state.get("last_symbol"):
         ticker_raw = symbol.strip().upper()
         tickers = [ticker_raw, ticker_raw + ".NS"]
         df, info = None, None
@@ -180,71 +182,117 @@ def render_stock():
                 df = bm.get_stock_data(t, period=period)
                 if df is not None and not df.empty:
                     info = bm.yf.Ticker(t).info
-                    ticker = t
+                    st.session_state["last_symbol"] = symbol
+                    st.session_state["last_df"] = df
+                    st.session_state["last_info"] = info
+                    st.session_state["last_period"] = period
                     break
-            except:
+            except Exception:
                 continue
 
         if df is None or df.empty:
             st.error("⚠️ No data found for this symbol.")
             return
 
-        # Format DataFrame
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = [c[0] for c in df.columns]
-        df = df.reset_index().rename(columns={"Datetime": "Date"})
-        df["Date"] = pd.to_datetime(df["Date"])
+    # --- Load from session if already fetched ---
+    df = st.session_state.get("last_df")
+    info = st.session_state.get("last_info")
+    if df is None or info is None:
+        st.warning("Please fetch stock data first.")
+        return
 
-        # Metrics
-        latest, first = df["Close"].iloc[-1], df["Close"].iloc[0]
-        change = round((latest - first) / first * 100, 2)
-        pe, mc, vol = info.get("trailingPE", "N/A"), humanize(info.get("marketCap", 0)), humanize(info.get("volume", 0))
-        div_yield = safe_dividend_format(info.get("dividendYield"))
+    # --- Clean DataFrame ---
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] for c in df.columns]
+    df = df.reset_index().rename(columns={"Datetime": "Date"})
+    df["Date"] = pd.to_datetime(df["Date"])
 
-        # Insight Card
-        st.success(f"📈 **{ticker_raw}** moved **{change}%** over selected period. Current price ₹{round(latest,2)}")
+    # --- Metric Calculations ---
+    latest, first = df["Close"].iloc[-1], df["Close"].iloc[0]
+    change = round((latest - first) / first * 100, 2)
+    pe = info.get("trailingPE", "N/A")
+    mc = humanize(info.get("marketCap", 0))
+    vol = humanize(info.get("volume", 0))
 
-        # Metrics
-        c1, c2, c3 = st.columns(3)
-        c1.metric("P/E Ratio", pe)
-        c2.metric("Market Cap", mc)
-        c3.metric("Volume", vol)
+    # Inline Dividend Yield correction logic
+    raw_dy = info.get("dividendYield", 0)
+    if raw_dy is None or raw_dy == 0:
+        div_yield = "N/A"
+    else:
+        v = float(raw_dy)
+        # auto-detect and fix wrong scaling (e.g. 58 instead of 0.58%)
+        if v > 10:
+            v = v / 100
+        div_yield = f"{round(v * 100, 2)}%"
 
-        c4, c5, c6 = st.columns(3)
-        c4.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
-        c5.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
-        c6.metric("Dividend Yield", div_yield)
+    st.success(f"📈 **{symbol.upper()}** moved **{change}%** this period. Current price ₹{round(latest, 2)}")
 
-        # Chart with optional RSI
-        fig = make_subplots(rows=2 if show_rsi else 1, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.75, 0.25] if show_rsi else [1])
+    # --- Metric Display ---
+    c1, c2, c3 = st.columns(3)
+    c1.metric("P/E Ratio", pe)
+    c2.metric("Market Cap", mc)
+    c3.metric("Volume", vol)
 
-        if chart_type == "Line":
-            fig.add_trace(go.Scatter(x=df["Date"], y=df["Close"], mode="lines+markers", name="Close"), row=1, col=1)
-            if show_ema:
-                fig.add_trace(go.Scatter(x=df["Date"], y=compute_ema(df["Close"], 12), name="EMA 12", line=dict(dash="dot")), row=1, col=1)
-                fig.add_trace(go.Scatter(x=df["Date"], y=compute_ema(df["Close"], 26), name="EMA 26", line=dict(dash="dash")), row=1, col=1)
+    c4, c5, c6 = st.columns(3)
+    c4.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
+    c5.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
+    c6.metric("Dividend Yield", div_yield)
+
+    # --- Chart Section (EMA + RSI + Candlestick Toggle) ---
+    fig = make_subplots(
+        rows=2 if show_rsi else 1,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.75, 0.25] if show_rsi else [1]
+    )
+
+    if chart_type == "Line":
+        fig.add_trace(go.Scatter(x=df["Date"], y=df["Close"], mode="lines+markers", name="Close"), row=1, col=1)
+        if show_ema:
+            fig.add_trace(go.Scatter(x=df["Date"], y=compute_ema(df["Close"], 12), name="EMA 12", line=dict(dash="dot")), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df["Date"], y=compute_ema(df["Close"], 26), name="EMA 26", line=dict(dash="dash")), row=1, col=1)
+    else:
+        fig.add_trace(go.Candlestick(
+            x=df["Date"],
+            open=df["Open"], high=df["High"],
+            low=df["Low"], close=df["Close"],
+            name="Candlestick"
+        ), row=1, col=1)
+        if show_ema:
+            fig.add_trace(go.Scatter(x=df["Date"], y=compute_ema(df["Close"], 12), name="EMA 12", line=dict(width=1, dash="dot")), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df["Date"], y=compute_ema(df["Close"], 26), name="EMA 26", line=dict(width=1, dash="dash")), row=1, col=1)
+
+    if show_rsi:
+        rsi = compute_rsi(df["Close"])
+        fig.add_trace(go.Scatter(x=df["Date"], y=rsi, mode="lines", name="RSI(14)", line=dict(color="#ff7f0e")), row=2, col=1)
+        fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
+        fig.add_hline(y=30, line=dict(color="green", dash="dot"), row=2, col=1)
+        fig.update_yaxes(range=[0, 100], row=2, col=1)
+
+    fig.update_layout(
+        template="plotly_dark",
+        title=f"{symbol.upper()} ({period})",
+        xaxis_title="Date",
+        yaxis_title="Price (₹)",
+        hovermode="x unified",
+        title_x=0.5
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --- Corporate Events ---
+    try:
+        events = []
+        if info.get("earningsTimestamp"):
+            events.append(f"📢 Earnings on **{pd.to_datetime(info['earningsTimestamp'], unit='s').strftime('%d %b %Y')}**")
+        if info.get("dividendDate"):
+            events.append(f"💰 Dividend payout expected **{pd.to_datetime(info['dividendDate'], unit='s').strftime('%d %b %Y')}**")
+        if events:
+            st.info("\n\n".join(events))
         else:
-            fig.add_trace(go.Candlestick(x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="Candlestick"), row=1, col=1)
-
-        if show_rsi:
-            rsi = compute_rsi(df["Close"])
-            fig.add_trace(go.Scatter(x=df["Date"], y=rsi, mode="lines", name="RSI(14)", line=dict(color="#ff7f0e")), row=2, col=1)
-            fig.add_hline(y=70, line=dict(color="red", dash="dot"), row=2, col=1)
-            fig.add_hline(y=30, line=dict(color="green", dash="dot"), row=2, col=1)
-            fig.update_yaxes(range=[0, 100], row=2, col=1)
-
-        fig.update_layout(template="plotly_dark", title=f"{ticker_raw} ({period})", xaxis_title="Date", yaxis_title="Price (₹)", hovermode="x unified", title_x=0.5)
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Company events
-        try:
-            events = []
-            if info.get("earningsTimestamp"):
-                events.append(f"📢 Earnings on **{pd.to_datetime(info['earningsTimestamp'], unit='s').strftime('%d %b %Y')}**")
-            if info.get("dividendDate"):
-                events.append(f"💰 Dividend payout expected **{pd.to_datetime(info['dividendDate'], unit='s').strftime('%d %b %Y')}**")
-            if events: st.info("\n\n".join(events))
-        except: st.caption("📅 No upcoming events found.")
+            st.caption("📅 No upcoming corporate events found.")
+    except:
+        st.caption("📅 No event data available.")
 
 # -----------------------------------------------------
 # TRENDS MODULE
