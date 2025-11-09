@@ -134,27 +134,88 @@ def render_home():
 
 def render_stock():
     st.header("💹 Stock Insights")
+
     symbol = st.text_input("Enter company symbol:", "TCS")
     period = st.selectbox("Select time range:", ["1d", "5d", "1mo", "3mo", "6mo", "1y"], index=2)
+
     if st.button("Fetch Stock Data"):
-        ticker = symbol.strip().upper()
-        if "." not in ticker:
-            ticker += ".NS"
-        df = bm.get_stock_data(ticker, period=period)
-        if df is None:
-            st.error("⚠️ No data available for this stock.")
-            return
-        info = bm.yf.Ticker(ticker).info
-        latest, first = round(df["Close"].iloc[-1], 2), round(df["Close"].iloc[0], 2)
-        change = round(((latest - first) / first) * 100, 2)
+        ticker_raw = symbol.strip().upper()
+
+        # ✅ Add .NS suffix for Indian tickers only if missing
+        ticker = ticker_raw if "." in ticker_raw else ticker_raw + ".NS"
+
+        with st.spinner("Fetching stock data..."):
+            df = bm.get_stock_data(ticker, period=period)
+            if df is None or df.empty:
+                st.error("⚠️ No data found for this ticker. Try another.")
+                return
+
+            # ✅ Ensure 'Date' column exists
+            if "Date" not in df.columns:
+                df = df.reset_index()
+
+            try:
+                info = bm.yf.Ticker(ticker).info
+            except Exception:
+                info = {}
+
+        # ✅ Extract basic values
+        latest_price = round(df["Close"].iloc[-1], 2)
+        first_price = round(df["Close"].iloc[0], 2)
+        change = round(((latest_price - first_price) / first_price) * 100, 2)
+
+        # ✅ Key metrics
+        pe_ratio = info.get("trailingPE", "N/A")
+        market_cap = info.get("marketCap", 0)
+        market_cap_crore = round(market_cap / 1e7, 2) if market_cap else "N/A"
+        high_52w = info.get("fiftyTwoWeekHigh", "N/A")
+        low_52w = info.get("fiftyTwoWeekLow", "N/A")
+        day_high = info.get("dayHigh", "N/A")
+        day_low = info.get("dayLow", "N/A")
+        volume = info.get("volume", "N/A")
+        dividend_yield = (
+            str(round(info.get("dividendYield", 0) * 100, 2)) + "%" if info.get("dividendYield") else "N/A"
+        )
+
+        # ✅ Display metrics
         c1, c2, c3 = st.columns(3)
-        c1.metric(f"{symbol.upper()}", f"₹{latest}", f"{change}%")
-        c2.metric("52W High", info.get("fiftyTwoWeekHigh", "N/A"))
-        c3.metric("52W Low", info.get("fiftyTwoWeekLow", "N/A"))
-        fig = px.line(df, x="Date", y="Close", title=f"{symbol.upper()} Price Movement", markers=True)
-        fig.update_traces(line_shape="spline")
-        fig.update_layout(template="plotly_dark", margin=dict(l=10, r=10, t=40, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+        c1.metric(f"{ticker_raw}", f"₹{latest_price}", f"{change}%")
+        c2.metric("P/E Ratio", pe_ratio)
+        c3.metric("Market Cap (₹ Cr)", market_cap_crore)
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("52W High", high_52w)
+        c5.metric("52W Low", low_52w)
+        c6.metric("Volume", volume)
+
+        c7, c8, c9 = st.columns(3)
+        c7.metric("Today's High", day_high)
+        c8.metric("Today's Low", day_low)
+        c9.metric("Dividend Yield", dividend_yield)
+
+        # ✅ Create chart safely
+        try:
+            fig = px.line(
+                df,
+                x=df.columns[0] if "Date" not in df.columns else "Date",
+                y="Close",
+                title=f"{ticker_raw} Price Trend ({period})",
+                markers=True
+            )
+            fig.update_traces(line_shape="spline")
+            fig.update_layout(
+                template="plotly_dark",
+                xaxis_title="Date",
+                yaxis_title="Price (₹)",
+                title_x=0.5,
+                margin=dict(l=20, r=20, t=40, b=20)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.warning(f"⚠️ Could not plot chart: {e}")
+
+        # ✅ Show last updated info
+        st.caption(f"📅 Data last updated: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
 
 def render_trends():
     st.header("💻 Tech & Startup Trends")
