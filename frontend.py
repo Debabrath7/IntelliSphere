@@ -85,15 +85,18 @@ div.stButton > button:hover {
 }
 </style>
 """, unsafe_allow_html=True)
-
 # -----------------------------------------------------
-# NAVIGATION STATE
+# NAVIGATION STATE (Safe initialization)
 # -----------------------------------------------------
-if "nav" not in st.session_state:
-    st.session_state["nav"] = "home"
+def init_session_state():
+    if "nav" not in st.session_state:
+        st.session_state["nav"] = "home"
 
 def set_nav(page):
     st.session_state["nav"] = page
+
+# Initialize immediately when file loads
+init_session_state()
 
 # -----------------------------------------------------
 # NAVBAR
