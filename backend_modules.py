@@ -1,7 +1,5 @@
 # backend_modules.py
-# Robust multi-source fetcher with embedded DEMO MODE (real-like baselines)
-# Tries: yfinance -> Yahoo CSV -> MoneyControl -> Demo synthetic data (fallback)
-# Demo mode embedded for 20 Indian stocks with real-like current baseline prices
+# Robust multi-source fetcher with live-demo baseline refresh (Moneycontrol fallback)
 # Author: Debabrath
 
 import warnings
@@ -20,7 +18,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from bs4 import BeautifulSoup
 
-# Optional sentiment pipeline
+# Optional sentiment pipeline (kept safe)
 try:
     from transformers import pipeline
     try:
@@ -34,7 +32,7 @@ except Exception:
     sentiment_analyzer = None
 
 # -------------------------
-# DEMO: 20 stocks & realistic baseline prices (approx current market levels)
+# DEMO: 20 stocks (symbols) - baseline values will be refreshed at runtime if live data is available
 # -------------------------
 DEMO_SYMBOLS = [
     "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","KOTAKBANK","ASIANPAINT",
@@ -42,19 +40,18 @@ DEMO_SYMBOLS = [
     "HINDUNILVR","AXISBANK","BAJAJFINSV","POWERGRID"
 ]
 
-# BASELINE_PRICES: user-corrected values applied where provided (SBIN, INFY, ITC, LT).
-# Note: other values are recent approximations (Nov 17, 2025) used for demo fallback.
+# Initial fallback approximations (kept as reasonable defaults)
 BASELINE_PRICES = {
     "RELIANCE": 2905.0,
     "TCS": 3095.0,
-    "INFY": 1501.0,       # user-corrected
+    "INFY": 1501.0,
     "HDFCBANK": 1580.0,
     "ICICIBANK": 1120.0,
-    "SBIN": 971.0,        # user-corrected
+    "SBIN": 971.0,
     "KOTAKBANK": 1880.0,
     "ASIANPAINT": 3330.0,
-    "ITC": 407.0,         # user-corrected
-    "LT": 4011.0,         # user-corrected
+    "ITC": 407.0,
+    "LT": 4011.0,
     "BHARTIARTL": 1290.0,
     "ULTRACEMCO": 10100.0,
     "WIPRO": 460.0,
@@ -74,9 +71,9 @@ def clean_ticker(ticker: str) -> str:
     if not isinstance(ticker, str):
         return ticker
     s = ticker.strip().upper()
-    for suf in [".NS", ".BO", ":NS", ":BO"]:
+    for suf in [".NS", ".BO", ":NS", ":BO", " NS", " BO"]:
         if s.endswith(suf):
-            s = s.replace(suf, "")
+            s = s[: -len(suf)]
     return s.strip()
 
 def resolve_ticker_candidates(symbol: str):
@@ -170,7 +167,7 @@ def _yahoo_csv_download(ticker, period="6mo", interval="1d"):
         return None
 
 # -------------------------
-# MoneyControl (best-effort)
+# MoneyControl helpers (best-effort)
 # -------------------------
 def _moneycontrol_autosuggest(q: str):
     try:
@@ -183,8 +180,7 @@ def _moneycontrol_autosuggest(q: str):
             data = json.loads(text)
         except Exception:
             try:
-                start = text.find("(")
-                end = text.rfind(")")
+                start = text.find("("); end = text.rfind(")")
                 if start!=-1 and end!=-1:
                     data = json.loads(text[start+1:end])
                 else:
@@ -215,6 +211,7 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
                 r = requests.get(url, timeout=8)
                 if r.status_code != 200:
                     continue
+                # try json
                 try:
                     data = r.json()
                     def find_list(d):
@@ -256,6 +253,7 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
                             return df_norm
                 except Exception:
                     pass
+                # try csv / html
                 text = r.text
                 if "\n" in text and "," in text and "Date" in text[:200]:
                     try:
@@ -281,8 +279,123 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
         pass
     return None
 
+def resolve_moneycontrol_code(symbol: str):
+    """Try to find a Moneycontrol scode for symbol (cached)."""
+    s = clean_ticker(symbol)
+    # quick heuristic: if symbol is already a code numeric, return it
+    if s.isdigit():
+        return s
+    # attempt autosuggest
+    res = _moneycontrol_autosuggest(s)
+    for it in res:
+        if isinstance(it, dict):
+            code = it.get("scode") or it.get("scid") or it.get("id") or it.get("sCode")
+            if not code:
+                url = it.get("url") or it.get("link") or ""
+                if isinstance(url, str) and url.strip():
+                    code = url.rstrip("/").split("/")[-1]
+            if code:
+                return str(code)
+    # fallback: symbol uppercase
+    return s
+
+def _fetch_price_from_moneycontrol_by_code(scode: str):
+    """Best-effort: query Moneycontrol price endpoints for a real-time value"""
+    try:
+        if not scode:
+            return None
+        # try priceapi endpoint used elsewhere
+        urls = [
+            f"https://priceapi.moneycontrol.com/pricefeed/stock/{scode}",
+            f"https://priceapi.moneycontrol.com/pricefeed/mcfeed/stock/{scode}",
+            f"https://priceapi.moneycontrol.com/pricefeed/pricefeed/stock/{scode}"
+        ]
+        for url in urls:
+            try:
+                r = requests.get(url, timeout=6)
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                # search for fields that look like price
+                for key in ("currentPrice","lastPrice","lastTradedPrice","ltp","price"):
+                    if isinstance(data, dict) and key in data:
+                        try:
+                            return float(data[key])
+                        except:
+                            pass
+                # flatten and find numeric-looking values
+                def find_price(o):
+                    if isinstance(o, dict):
+                        for v in o.values():
+                            p = find_price(v)
+                            if p is not None:
+                                return p
+                    elif isinstance(o, list):
+                        for it in o:
+                            p = find_price(it)
+                            if p is not None:
+                                return p
+                    else:
+                        # heuristics: numeric and within realistic range
+                        try:
+                            val = float(o)
+                            if val > 1.0:
+                                return val
+                        except:
+                            pass
+                    return None
+                p = find_price(data)
+                if p is not None:
+                    return float(p)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+def refresh_demo_baselines(timeout_per_code=2.0):
+    """Attempt to fetch live prices for DEMO_SYMBOLS and update BASELINE_PRICES in-place.
+    This is best-effort and will not raise; it returns a dict of updated prices found.
+    """
+    updated = {}
+    for sym in DEMO_SYMBOLS:
+        try:
+            scode = resolve_moneycontrol_code(sym)
+            if scode:
+                p = _fetch_price_from_moneycontrol_by_code(scode)
+                if p is not None and p > 0:
+                    BASELINE_PRICES[sym] = float(p)
+                    updated[sym] = float(p)
+                    # small delay so we don't hammer APIs
+                    time.sleep(0.15)
+                    continue
+        except Exception:
+            pass
+        # fall back: try yfinance last price (best-effort)
+        try:
+            candidate = f"{sym}.NS"
+            df = _yf_download(candidate, period="5d", interval="1d")
+            if df is not None and not df.empty:
+                dfn = _normalize_df(df)
+                if dfn is not None:
+                    val = float(dfn["Close"].dropna().iloc[-1])
+                    BASELINE_PRICES[sym] = val
+                    updated[sym] = val
+                    continue
+        except Exception:
+            pass
+        # keep existing baseline if all fails
+    return updated
+
+# Try refresh at import but do not block long; safe best-effort (non-fatal)
+try:
+    # small quick refresh in background-like manner (but synchronous here)
+    _ = refresh_demo_baselines()
+except Exception:
+    pass
+
 # -------------------------
-# DEMO synthetic data generator (REAL-LIKE baseline)
+# DEMO generator functions (unchanged)
 # -------------------------
 def _seed_from_string(s: str) -> int:
     h = hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -370,9 +483,7 @@ def _build_demo_intraday_df(symbol: str):
     df["Volume"] = volumes
     return _normalize_df(df)
 
-# -------------------------
-# DEMO cache for speed
-# -------------------------
+# caches for demo
 _DEMO_DAILY_CACHE = {}
 _DEMO_INTRADAY_CACHE = {}
 
@@ -395,69 +506,7 @@ def _get_demo(symbol: str, period="6mo", interval="1d"):
         return df
 
 # -------------------------
-# MoneyControl master resolver (lightweight)
-# -------------------------
-@lru_cache(maxsize=1)
-def build_moneycontrol_master():
-    master = {}
-    endpoints = [
-        "https://priceapi.moneycontrol.com/pricefeed/bse/equitycash",
-        "https://priceapi.moneycontrol.com/pricefeed/nse/equitycash",
-        "https://priceapi.moneycontrol.com/pricefeed/stocklist"
-    ]
-    for url in endpoints:
-        try:
-            r = requests.get(url, timeout=6)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            def walk(d):
-                if isinstance(d, dict):
-                    keys = set(k.lower() for k in d.keys())
-                    if ("scode" in keys or "scid" in keys or "sc_id" in keys or "code" in keys) and ("symbol" in keys or "name" in keys or "company" in keys):
-                        code = d.get("scode") or d.get("scid") or d.get("sc_id") or d.get("code")
-                        symbol = d.get("symbol") or d.get("name") or d.get("company")
-                        try:
-                            if code and symbol:
-                                master[str(symbol).upper()] = str(code)
-                                master[str(code).upper()] = str(code)
-                        except:
-                            pass
-                    for v in d.values():
-                        walk(v)
-                elif isinstance(d, list):
-                    for item in d:
-                        walk(item)
-            walk(data)
-        except Exception:
-            continue
-    for sym in DEMO_SYMBOLS:
-        master.setdefault(sym.upper(), sym.upper())
-    return master
-
-def resolve_moneycontrol_code(symbol: str):
-    if not symbol:
-        return None
-    s = clean_ticker(symbol)
-    master = build_moneycontrol_master()
-    if s in master:
-        return master[s]
-    for k,v in master.items():
-        if k and s and (s in k or k in s):
-            return v
-    results = _moneycontrol_autosuggest(s)
-    for it in results:
-        if isinstance(it, dict):
-            code = it.get("scode") or it.get("scid") or it.get("id") or it.get("sCode")
-            url = it.get("url") or it.get("link")
-            if not code and isinstance(url,str):
-                code = url.rstrip("/").split("/")[-1]
-            if code:
-                return str(code)
-    return None
-
-# -------------------------
-# Main resolver: try live sources, fallback to demo
+# master resolve & best-ticker (tries live then demo)
 # -------------------------
 def get_best_ticker(symbol, period="6mo", interval="1d"):
     if not symbol:
@@ -488,6 +537,7 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
                 return mc, dfmc
     except Exception:
         pass
+    # fallback to demo generator but still label as DEMO:
     try:
         demo = _get_demo(symbol, period=period, interval=interval)
         if demo is not None:
@@ -496,9 +546,7 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
         pass
     return None, None
 
-# -------------------------
-# Public functions used by frontend
-# -------------------------
+# Public friendly wrappers
 def get_stock_data(symbol: str, period="6mo", interval="1d"):
     _, df = get_best_ticker(symbol, period, interval)
     return df
@@ -530,7 +578,7 @@ def stock_summary(symbol: str, period="6mo", interval="1d"):
         return None
 
 # -------------------------
-# News & sentiment helpers
+# News & sentiment helpers (kept minimal)
 # -------------------------
 import feedparser
 def fetch_news_via_google_rss(query: str, max_items: int = 10):
@@ -596,3 +644,5 @@ def fetch_arxiv_papers(query, max_results=5):
         return out
     except Exception:
         return []
+
+# END
