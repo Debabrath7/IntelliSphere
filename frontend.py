@@ -387,18 +387,25 @@ def render_feedback():
 
 # ---------------------------
 # Router
-# ---------------------------
-if page == "Home":
-    st.markdown("<div class='card'><h1>Welcome to IntelliSphere</h1><p>Premium AI-powered dashboard.</p></div>", unsafe_allow_html=True)
-elif page == "Stocks":
-    render_stocks_page()
-elif page == "Trends":
-    render_trends()
-elif page == "Research":
-    render_research()
-elif page == "News":
-    render_news()
-elif page == "Feedback":
-    render_feedback()
-else:
-    st.write("Page not found.")
+# ---------------------------# ==============================================================
+# Router wrapper for app.py
+# ==============================================================
+def render_dashboard():
+    # Re-render sidebar and route
+    page = render_sidebar()
+
+    if page == "Home":
+        st.markdown("<div class='card'><h1>Welcome to IntelliSphere</h1><p>Premium AI-powered dashboard.</p></div>", unsafe_allow_html=True)
+    elif page == "Stocks":
+        render_stocks_page()
+    elif page == "Trends":
+        render_trends()
+    elif page == "Research":
+        render_research()
+    elif page == "News":
+        render_news()
+    elif page == "Feedback":
+        render_feedback()
+    else:
+        st.write("Page not found.")
+
