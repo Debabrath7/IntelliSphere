@@ -1,8 +1,8 @@
 # backend_modules.py
-# Robust multi-source fetcher with embedded DEMO MODE (no external files)
-# Tries: yfinance -> Yahoo CSV -> MoneyControl -> Demo synthetic data
-# Demo mode embedded for 20 Indian stocks and any other symbol (fallback)
-# Author: assistant (embedded demo)
+# Robust multi-source fetcher with embedded DEMO MODE (real-like baselines)
+# Tries: yfinance -> Yahoo CSV -> MoneyControl -> Demo synthetic data (fallback)
+# Demo mode embedded for 20 Indian stocks with real-like current baseline prices
+# Author: Debabrath
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -34,13 +34,37 @@ except Exception:
     sentiment_analyzer = None
 
 # -------------------------
-# DEMO: list of 20 stocks (preferred demo set)
+# DEMO: 20 stocks & realistic baseline prices (approx current market levels)
+# (These baseline numbers are realistic approximations to make demo look believable)
 # -------------------------
 DEMO_SYMBOLS = [
     "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","KOTAKBANK","ASIANPAINT",
     "ITC","LT","BHARTIARTL","ULTRACEMCO","WIPRO","HCLTECH","MARUTI","TECHM",
     "HINDUNILVR","AXISBANK","BAJAJFINSV","POWERGRID"
 ]
+
+BASELINE_PRICES = {
+    "RELIANCE": 2600.0,
+    "TCS": 3500.0,
+    "INFY": 1500.0,
+    "HDFCBANK": 1650.0,
+    "ICICIBANK": 1000.0,
+    "SBIN": 700.0,
+    "KOTAKBANK": 1800.0,
+    "ASIANPAINT": 4200.0,
+    "ITC": 470.0,
+    "LT": 3600.0,
+    "BHARTIARTL": 900.0,
+    "ULTRACEMCO": 9000.0,
+    "WIPRO": 450.0,
+    "HCLTECH": 1200.0,
+    "MARUTI": 12000.0,
+    "TECHM": 1200.0,
+    "HINDUNILVR": 2600.0,
+    "AXISBANK": 1200.0,
+    "BAJAJFINSV": 13500.0,
+    "POWERGRID": 320.0
+}
 
 # -------------------------
 # Utilities
@@ -177,7 +201,6 @@ def _moneycontrol_autosuggest(q: str):
         return []
 
 def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
-    # try various endpoints; best-effort parsing
     try:
         if not scode:
             return None
@@ -191,10 +214,8 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
                 r = requests.get(url, timeout=8)
                 if r.status_code != 200:
                     continue
-                # Try JSON
                 try:
                     data = r.json()
-                    # find a list of dicts with date/close keys
                     def find_list(d):
                         if isinstance(d, list) and d and isinstance(d[0], dict):
                             if any(k.lower() in ("date","dt","timestamp") for k in d[0].keys()):
@@ -208,12 +229,10 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
                     arr = find_list(data)
                     if arr:
                         df = pd.DataFrame(arr)
-                        # standardize names
                         for cand in ["date","Date","dt","timestamp"]:
                             if cand in df.columns:
                                 df = df.rename(columns={cand:"Date"})
                                 break
-                        # map OHLC
                         mapping={}
                         for col in df.columns:
                             low = col.lower()
@@ -236,7 +255,6 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
                             return df_norm
                 except Exception:
                     pass
-                # try CSV/HTML parse
                 text = r.text
                 if "\n" in text and "," in text and "Date" in text[:200]:
                     try:
@@ -263,14 +281,13 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
     return None
 
 # -------------------------
-# DEMO synthetic data generator
+# DEMO synthetic data generator (REAL-LIKE baseline)
 # -------------------------
 def _seed_from_string(s: str) -> int:
     h = hashlib.sha256(s.encode("utf-8")).hexdigest()
     return int(h[:16], 16) % (2**31)
 
 def _generate_price_series(seed:int, start_price:float, days:int, mu=0.0002, sigma=0.02):
-    """Geometric Brownian Motion daily close series"""
     rng = np.random.RandomState(seed)
     dt = 1.0
     prices = [start_price]
@@ -280,28 +297,38 @@ def _generate_price_series(seed:int, start_price:float, days:int, mu=0.0002, sig
     return np.array(prices)
 
 def _build_demo_daily_df(symbol: str, years: int = 5):
-    """Return daily OHLCV for past `years` years (trading-like days ~252/yr)"""
     symbol = symbol.upper()
     seed = _seed_from_string(symbol)
     days = years * 252
-    # pick a plausible start price based on hashed seed
-    start_price = 50 + (seed % 4500) * 0.01  # yields 50 -> ~95
-    closes = _generate_price_series(seed+1, start_price, days, mu=0.0003, sigma=0.02)
+    # Use baseline price if available, else scale from seed
+    baseline = BASELINE_PRICES.get(symbol, None)
+    if baseline is not None:
+        start_price = baseline * 0.65  # start earlier lower to allow realistic growth/volatility
+        mu = 0.00025
+        sigma = 0.018
+    else:
+        start_price = 50 + (seed % 4500) * 0.01
+        mu = 0.0003
+        sigma = 0.02
+    closes = _generate_price_series(seed+1, start_price, days, mu=mu, sigma=sigma)
+    # shift series so last close matches baseline if baseline available
+    if baseline is not None:
+        factor = baseline / float(closes[-1])
+        closes = closes * factor
+    # generate dates (business days)
     dates = []
     today = datetime.utcnow().date()
-    # generate business day dates backwards
     dt = today
     while len(dates) < days:
         if dt.weekday() < 5:
             dates.append(dt)
         dt = dt - timedelta(days=1)
-    dates = list(reversed(dates))  # oldest -> newest
+    dates = list(reversed(dates))
     df = pd.DataFrame({"Date": pd.to_datetime(dates)})
-    # make OHLC around close with small intraday noise
     rng = np.random.RandomState(seed+2)
-    opens = closes * (1 + rng.normal(0, 0.002, size=len(closes)))
-    highs = np.maximum(opens, closes) * (1 + np.abs(rng.normal(0, 0.008, size=len(closes))))
-    lows = np.minimum(opens, closes) * (1 - np.abs(rng.normal(0, 0.008, size=len(closes))))
+    opens = closes * (1 + rng.normal(0, 0.0025, size=len(closes)))
+    highs = np.maximum(opens, closes) * (1 + np.abs(rng.normal(0, 0.006, size=len(closes))))
+    lows = np.minimum(opens, closes) * (1 - np.abs(rng.normal(0, 0.006, size=len(closes))))
     volumes = (rng.normal(loc=5e6, scale=2e6, size=len(closes))).astype(int)
     volumes = np.where(volumes < 1000, 1000, volumes)
     df["Open"] = opens
@@ -312,41 +339,31 @@ def _build_demo_daily_df(symbol: str, years: int = 5):
     return _normalize_df(df)
 
 def _build_demo_intraday_df(symbol: str):
-    """Generate minute-level bars for the last trading day (around 390 minutes)"""
     symbol = symbol.upper()
     seed = _seed_from_string(symbol) + 1000
     rng = np.random.RandomState(seed)
-    minutes = 390  # typical trading minutes
-    # base price from daily generator last close
+    minutes = 390
     daily = _build_demo_daily_df(symbol, years=1)
-    if daily is None or daily.empty:
-        base = 100.0
-    else:
-        base = float(daily["Close"].iloc[-1])
-    # generate minute returns
+    base = float(daily["Close"].iloc[-1]) if (daily is not None and not daily.empty) else (BASELINE_PRICES.get(symbol, 100.0))
     mu = 0.0
-    sigma = 0.0008
+    sigma = 0.0007
     returns = rng.normal(loc=mu, scale=sigma, size=minutes)
     prices = [base]
     for r in returns:
         prices.append(max(0.01, prices[-1] * math.exp(r)))
     prices = prices[1:]
-    # timestamps: last trading day (use yesterday if weekend)
-    today = datetime.utcnow().date()
-    last_day = today
+    last_day = datetime.utcnow().date()
     if last_day.weekday() >= 5:
-        # back up to previous Friday
         offset = (last_day.weekday() - 4)
         last_day = last_day - timedelta(days=offset)
-    # trading window: 9:15 to 15:30 ~ 6h15 = 375min; we'll use 390 for simplicity
     start_dt = datetime.combine(last_day, datetime.min.time()) + timedelta(hours=9, minutes=15)
     times = [start_dt + timedelta(minutes=i) for i in range(minutes)]
     df = pd.DataFrame({"Date": times})
     rng2 = np.random.RandomState(seed+2)
     opens = np.array(prices) * (1 + rng2.normal(0, 0.0005, size=len(prices)))
-    highs = np.maximum(opens, prices) * (1 + np.abs(rng2.normal(0, 0.0015, size=len(prices))))
-    lows = np.minimum(opens, prices) * (1 - np.abs(rng2.normal(0, 0.0015, size=len(prices))))
-    volumes = (rng2.normal(loc=2000, scale=800, size=len(prices))).astype(int)
+    highs = np.maximum(opens, prices) * (1 + np.abs(rng2.normal(0, 0.0012, size=len(prices))))
+    lows = np.minimum(opens, prices) * (1 - np.abs(rng2.normal(0, 0.0012, size=len(prices))))
+    volumes = (rng2.normal(loc=2000, scale=1000, size=len(prices))).astype(int)
     volumes = np.where(volumes < 1, 1, volumes)
     df["Open"] = opens
     df["High"] = highs
@@ -363,19 +380,14 @@ _DEMO_INTRADAY_CACHE = {}
 
 def _get_demo(symbol: str, period="6mo", interval="1d"):
     s = clean_ticker(symbol)
-    # if user asked intraday
     if interval.endswith("m") or interval in ("1m","5m","15m"):
         if s not in _DEMO_INTRADAY_CACHE:
             _DEMO_INTRADAY_CACHE[s] = _build_demo_intraday_df(s)
         return _DEMO_INTRADAY_CACHE[s]
-    # otherwise daily
-    # we generate 5-year daily and then slice according to period
     if s not in _DEMO_DAILY_CACHE:
         _DEMO_DAILY_CACHE[s] = _build_demo_daily_df(s, years=5)
     df = _DEMO_DAILY_CACHE[s]
-    # slice for period
     days = _period_to_days(period)
-    # take last `days` trading days (approx)
     try:
         last = df.tail(days)
         if last.empty:
@@ -390,7 +402,6 @@ def _get_demo(symbol: str, period="6mo", interval="1d"):
 @lru_cache(maxsize=1)
 def build_moneycontrol_master():
     master = {}
-    # attempt to fetch priceapi lists (best-effort)
     endpoints = [
         "https://priceapi.moneycontrol.com/pricefeed/bse/equitycash",
         "https://priceapi.moneycontrol.com/pricefeed/nse/equitycash",
@@ -422,7 +433,6 @@ def build_moneycontrol_master():
             walk(data)
         except Exception:
             continue
-    # seed master with demo symbols
     for sym in DEMO_SYMBOLS:
         master.setdefault(sym.upper(), sym.upper())
     return master
@@ -455,7 +465,6 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
     if not symbol:
         return None, None
     candidates = resolve_ticker_candidates(symbol)
-    # 1) try yfinance
     for t in candidates:
         try:
             df = _yf_download(t, period, interval)
@@ -464,7 +473,6 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
                 return t, df
         except Exception:
             continue
-    # 2) yahoo csv fallback
     for t in candidates:
         try:
             df2 = _yahoo_csv_download(t, period, interval)
@@ -473,7 +481,6 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
                 return t, df2
         except Exception:
             continue
-    # 3) MoneyControl fallback
     try:
         mc = resolve_moneycontrol_code(symbol)
         if mc:
@@ -483,7 +490,6 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
                 return mc, dfmc
     except Exception:
         pass
-    # 4) DEMO fallback (guaranteed)
     try:
         demo = _get_demo(symbol, period=period, interval=interval)
         if demo is not None:
