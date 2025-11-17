@@ -42,28 +42,29 @@ DEMO_SYMBOLS = [
     "HINDUNILVR","AXISBANK","BAJAJFINSV","POWERGRID"
 ]
 
-# Updated baseline prices (Nov 2025 approximate)
+# BASELINE_PRICES: user-corrected values applied where provided (SBIN, INFY, ITC, LT).
+# Note: other values are recent approximations (Nov 17, 2025) used for demo fallback.
 BASELINE_PRICES = {
-    "RELIANCE": 2885.0,
-    "TCS": 4120.0,
-    "INFY": 1635.0,
-    "HDFCBANK": 1592.0,
-    "ICICIBANK": 1125.0,
-    "SBIN": 791.0,
-    "KOTAKBANK": 1878.0,
-    "ASIANPAINT": 3305.0,
-    "ITC": 453.0,
-    "LT": 3950.0,
-    "BHARTIARTL": 1285.0,
-    "ULTRACEMCO": 9980.0,
-    "WIPRO": 448.0,
-    "HCLTECH": 1705.0,
-    "MARUTI": 121500.0,
+    "RELIANCE": 2905.0,
+    "TCS": 3095.0,
+    "INFY": 1501.0,       # user-corrected
+    "HDFCBANK": 1580.0,
+    "ICICIBANK": 1120.0,
+    "SBIN": 971.0,        # user-corrected
+    "KOTAKBANK": 1880.0,
+    "ASIANPAINT": 3330.0,
+    "ITC": 407.0,         # user-corrected
+    "LT": 4011.0,         # user-corrected
+    "BHARTIARTL": 1290.0,
+    "ULTRACEMCO": 10100.0,
+    "WIPRO": 460.0,
+    "HCLTECH": 1700.0,
+    "MARUTI": 124500.0,
     "TECHM": 1510.0,
     "HINDUNILVR": 2520.0,
-    "AXISBANK": 1245.0,
-    "BAJAJFINSV": 17400.0,
-    "POWERGRID": 298.0
+    "AXISBANK": 1250.0,
+    "BAJAJFINSV": 17800.0,
+    "POWERGRID": 305.0
 }
 
 # -------------------------
