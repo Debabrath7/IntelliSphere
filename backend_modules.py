@@ -1,8 +1,8 @@
 # backend_modules.py
-# Robust, multi-source stock data fetcher for Indian stocks
-# Tries: yfinance -> Yahoo CSV -> MoneyControl (autosuggest + price endpoints)
-# Exposes: get_stock_data, get_intraday_data, get_today_high_low, stock_summary, etc.
-# Author: Debabrath
+# Robust multi-source fetcher with embedded DEMO MODE (no external files)
+# Tries: yfinance -> Yahoo CSV -> MoneyControl -> Demo synthetic data
+# Demo mode embedded for 20 Indian stocks and any other symbol (fallback)
+# Author: assistant (embedded demo)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -10,6 +10,8 @@ warnings.filterwarnings("ignore")
 import time
 import io
 import json
+import math
+import hashlib
 import requests
 import pandas as pd
 import numpy as np
@@ -18,7 +20,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from bs4 import BeautifulSoup
 
-# Optional sentiment model (best-effort)
+# Optional sentiment pipeline
 try:
     from transformers import pipeline
     try:
@@ -32,10 +34,18 @@ except Exception:
     sentiment_analyzer = None
 
 # -------------------------
+# DEMO: list of 20 stocks (preferred demo set)
+# -------------------------
+DEMO_SYMBOLS = [
+    "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","KOTAKBANK","ASIANPAINT",
+    "ITC","LT","BHARTIARTL","ULTRACEMCO","WIPRO","HCLTECH","MARUTI","TECHM",
+    "HINDUNILVR","AXISBANK","BAJAJFINSV","POWERGRID"
+]
+
+# -------------------------
 # Utilities
 # -------------------------
 def clean_ticker(ticker: str) -> str:
-    """Normalize tickers: uppercase, remove common suffixes"""
     if not isinstance(ticker, str):
         return ticker
     s = ticker.strip().upper()
@@ -45,27 +55,17 @@ def clean_ticker(ticker: str) -> str:
     return s.strip()
 
 def resolve_ticker_candidates(symbol: str):
-    """
-    Return candidate tickers that we will try with yfinance/Yahoo CSV.
-    We still rely on MoneyControl for robust mapping if these fail.
-    """
     s = clean_ticker(symbol)
     if not s:
         return []
     if s.isdigit():
         return [f"{s}.BO", s]
-    # try NSE, BSE, raw
     return [f"{s}.NS", f"{s}.BO", s]
 
-# -------------------------
-# Normalize DF
-# -------------------------
 def _normalize_df(df):
-    """Return DataFrame with Date,Open,High,Low,Close,Volume or None."""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return None
     df = df.copy()
-    # Ensure Date column
     if "Datetime" in df.columns and "Date" not in df.columns:
         df = df.rename(columns={"Datetime": "Date"})
     if "Date" not in df.columns:
@@ -74,18 +74,16 @@ def _normalize_df(df):
         df["Date"] = pd.to_datetime(df["Date"])
     except Exception:
         pass
-    # Ensure OHLCV columns
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
+    for col in ["Open","High","Low","Close","Volume"]:
         if col not in df.columns:
             df[col] = np.nan
-    # Keep only the required columns
-    out = df.loc[:, ["Date", "Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Date"])
+    out = df.loc[:, ["Date","Open","High","Low","Close","Volume"]].dropna(subset=["Date"])
     if out.empty:
         return None
     return out
 
 # -------------------------
-# yfinance wrapper with retry
+# yfinance fallback
 # -------------------------
 def _yf_download(ticker, period, interval):
     try:
@@ -104,22 +102,20 @@ def _yf_download(ticker, period, interval):
             return None
 
 # -------------------------
-# Yahoo CSV fallback (direct HTTP)
+# Yahoo CSV fallback
 # -------------------------
-_PERIOD_DAYS = {
-    "1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 182, "1y": 365, "2y": 365*2, "5y": 365*5, "10y": 365*10
-}
+_PERIOD_DAYS = {"1d":1,"5d":5,"1mo":30,"3mo":90,"6mo":182,"1y":365,"2y":365*2,"5y":365*5,"10y":365*10}
 def _period_to_days(period):
-    if isinstance(period, int):
+    if isinstance(period,int):
         return period
     p = str(period).lower()
     if p in _PERIOD_DAYS:
         return _PERIOD_DAYS[p]
     if p.endswith("mo") or p.endswith("m"):
-        try: return int(p.rstrip("mo").rstrip("m")) * 30
+        try: return int(p.rstrip("mo").rstrip("m"))*30
         except: pass
     if p.endswith("y"):
-        try: return int(p.rstrip("y")) * 365
+        try: return int(p.rstrip("y"))*365
         except: pass
     return 365
 
@@ -128,7 +124,7 @@ def _yahoo_csv_download(ticker, period="6mo", interval="1d"):
         days = _period_to_days(period)
         end = int(datetime.utcnow().timestamp())
         start = int((datetime.utcnow() - timedelta(days=days)).timestamp())
-        params = {"period1": start, "period2": end, "interval": interval, "events": "history", "includeAdjustedClose": "true"}
+        params = {"period1": start, "period2": end, "interval": interval, "events":"history","includeAdjustedClose":"true"}
         url = f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}"
         r = requests.get(url, params=params, timeout=10)
         if r.status_code != 200:
@@ -139,7 +135,6 @@ def _yahoo_csv_download(ticker, period="6mo", interval="1d"):
         df = pd.read_csv(io.StringIO(text), parse_dates=["Date"])
         if df.empty:
             return None
-        # Ensure numeric OHLCV
         for c in ["Open","High","Low","Close","Volume"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -150,132 +145,99 @@ def _yahoo_csv_download(ticker, period="6mo", interval="1d"):
         return None
 
 # -------------------------
-# MoneyControl: autosuggest + historical fetch
+# MoneyControl (best-effort) - simple autosuggest and fetch
 # -------------------------
-def _moneycontrol_autosuggest(query: str):
-    """
-    Use MoneyControl autosuggest endpoint to find matching entries.
-    Returns list of result dicts (may include 'scode' or 'sc_id' or 'url' slugs).
-    """
+def _moneycontrol_autosuggest(q: str):
     try:
-        q = str(query).strip()
-        if not q:
-            return []
         url = "https://www.moneycontrol.com/mccode/common/autosuggest.php"
         r = requests.get(url, params={"query": q}, timeout=8)
         if r.status_code != 200:
             return []
         text = r.text.strip()
-        # Response may be JSON or JSONP. Try to extract JSON.
         try:
             data = json.loads(text)
         except Exception:
-            # strip callback(...) if present
             try:
                 start = text.find("(")
                 end = text.rfind(")")
-                if start != -1 and end != -1:
-                    body = text[start+1:end]
-                    data = json.loads(body)
+                if start!=-1 and end!=-1:
+                    data = json.loads(text[start+1:end])
                 else:
                     data = []
             except Exception:
                 data = []
-        # Data may be string-keyed dict or list
         if isinstance(data, dict) and "results" in data:
-            items = data["results"]
-        elif isinstance(data, list):
-            items = data
-        elif isinstance(data, dict):
-            items = list(data.values())
-        else:
-            items = []
-        return items
+            return data["results"]
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return list(data.values())
+        return []
     except Exception:
         return []
 
 def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
-    """
-    Attempt to retrieve historical OHLC data for a moneycontrol code.
-    Tries known MoneyControl endpoints and simple HTML table parsing as a fallback.
-    Returns normalized DataFrame or None.
-    """
+    # try various endpoints; best-effort parsing
     try:
         if not scode:
             return None
-        # Try common MoneyControl endpoints known to work in many cases.
-        #  - get_price endpoint (returns CSV / json in several cases)
-        #  - pricefeed endpoints
-        period_str = period
         candidates = [
-            f"https://www.moneycontrol.com/stocks/histories/get_price/{scode}?period={period_str}",
+            f"https://www.moneycontrol.com/stocks/histories/get_price/{scode}?period={period}",
             f"https://priceapi.moneycontrol.com/pricefeed/mcfeed/stock/{scode}",
-            f"https://priceapi.moneycontrol.com/pricefeed/historical/{scode}?Period={period_str}"
+            f"https://priceapi.moneycontrol.com/pricefeed/historical/{scode}?Period={period}"
         ]
         for url in candidates:
             try:
                 r = requests.get(url, timeout=8)
                 if r.status_code != 200:
                     continue
-                text = r.text
-                # If JSON response with time-series
+                # Try JSON
                 try:
                     data = r.json()
-                    # Try to parse common structures
-                    # pricefeed/mcfeed/stock/{scode} returns nested dict with 'data' etc.
-                    if isinstance(data, dict):
-                        # Common keys with historical series might be under 'data' or 'series' or 'history'
-                        # Try to extract arrays for dates/prices
-                        # Heuristics: look for arrays of dicts with date/open/high/low/close/volume
-                        def extract_from_dict(d):
-                            if not isinstance(d, dict):
-                                return None
-                            # search recursively for list of dicts with 'date' and 'close' or 'closePrice'
-                            for k, v in d.items():
-                                if isinstance(v, list) and v and isinstance(v[0], dict):
-                                    if any(key.lower() in ("close","closeprice","close_price","closeValue") for key in v[0].keys()):
-                                        return v
-                                elif isinstance(v, dict):
-                                    res = extract_from_dict(v)
-                                    if res:
-                                        return res
-                            return None
-                        arr = extract_from_dict(data)
-                        if arr:
-                            # convert to DataFrame carefully
-                            df = pd.DataFrame(arr)
-                            # try to rename typical fields
-                            for cand in ["date", "Date", "dt", "timestamp"]:
-                                if cand in df.columns:
-                                    df = df.rename(columns={cand: "Date"})
-                                    break
-                            # Normalize OHLCV columns
-                            mapping = {}
-                            for col in df.columns:
-                                low = col.lower()
-                                if "open" in low: mapping[col] = "Open"
-                                if "high" in low: mapping[col] = "High"
-                                if "low" in low: mapping[col] = "Low"
-                                if "close" in low: mapping[col] = "Close"
-                                if "volume" in low: mapping[col] = "Volume"
-                            df = df.rename(columns=mapping)
-                            if "Date" in df.columns:
-                                # coerce numeric date if needed
+                    # find a list of dicts with date/close keys
+                    def find_list(d):
+                        if isinstance(d, list) and d and isinstance(d[0], dict):
+                            if any(k.lower() in ("date","dt","timestamp") for k in d[0].keys()):
+                                return d
+                        if isinstance(d, dict):
+                            for v in d.values():
+                                res = find_list(v)
+                                if res:
+                                    return res
+                        return None
+                    arr = find_list(data)
+                    if arr:
+                        df = pd.DataFrame(arr)
+                        # standardize names
+                        for cand in ["date","Date","dt","timestamp"]:
+                            if cand in df.columns:
+                                df = df.rename(columns={cand:"Date"})
+                                break
+                        # map OHLC
+                        mapping={}
+                        for col in df.columns:
+                            low = col.lower()
+                            if "open" in low: mapping[col]="Open"
+                            if "high" in low: mapping[col]="High"
+                            if "low" in low: mapping[col]="Low"
+                            if "close" in low: mapping[col]="Close"
+                            if "volume" in low: mapping[col]="Volume"
+                        df = df.rename(columns=mapping)
+                        if "Date" in df.columns:
+                            try:
+                                df["Date"] = pd.to_datetime(df["Date"], unit='s')
+                            except:
                                 try:
-                                    df["Date"] = pd.to_datetime(df["Date"], unit='s')
-                                except Exception:
-                                    try:
-                                        df["Date"] = pd.to_datetime(df["Date"])
-                                    except:
-                                        pass
-                            df_norm = _normalize_df(df)
-                            if df_norm is not None:
-                                return df_norm
-                    # if not JSON with series, continue to HTML parsing
+                                    df["Date"] = pd.to_datetime(df["Date"])
+                                except:
+                                    pass
+                        df_norm = _normalize_df(df)
+                        if df_norm is not None:
+                            return df_norm
                 except Exception:
                     pass
-
-                # If text contains CSV-like lines, attempt CSV parse
+                # try CSV/HTML parse
+                text = r.text
                 if "\n" in text and "," in text and "Date" in text[:200]:
                     try:
                         df = pd.read_csv(io.StringIO(text), parse_dates=["Date"])
@@ -284,22 +246,16 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
                             return df_norm
                     except Exception:
                         pass
-
-                # Fallback: parse HTML tables on page
                 try:
                     soup = BeautifulSoup(text, "html.parser")
                     table = soup.find("table")
                     if table:
-                        df_list = pd.read_html(str(table))
-                        if df_list:
-                            df = df_list[0]
-                            # try to find Date/Close etc.
-                            df_norm = _normalize_df(df)
-                            if df_norm is not None:
-                                return df_norm
+                        df = pd.read_html(str(table))[0]
+                        df_norm = _normalize_df(df)
+                        if df_norm is not None:
+                            return df_norm
                 except Exception:
                     pass
-
             except Exception:
                 continue
     except Exception:
@@ -307,43 +263,151 @@ def _moneycontrol_historical_by_code(scode: str, period="6mo", interval="1d"):
     return None
 
 # -------------------------
-# Build MoneyControl master list (cached)
+# DEMO synthetic data generator
+# -------------------------
+def _seed_from_string(s: str) -> int:
+    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    return int(h[:16], 16) % (2**31)
+
+def _generate_price_series(seed:int, start_price:float, days:int, mu=0.0002, sigma=0.02):
+    """Geometric Brownian Motion daily close series"""
+    rng = np.random.RandomState(seed)
+    dt = 1.0
+    prices = [start_price]
+    for _ in range(days-1):
+        shock = rng.normal(loc=mu*dt, scale=sigma*math.sqrt(dt))
+        prices.append(max(0.01, prices[-1] * math.exp(shock)))
+    return np.array(prices)
+
+def _build_demo_daily_df(symbol: str, years: int = 5):
+    """Return daily OHLCV for past `years` years (trading-like days ~252/yr)"""
+    symbol = symbol.upper()
+    seed = _seed_from_string(symbol)
+    days = years * 252
+    # pick a plausible start price based on hashed seed
+    start_price = 50 + (seed % 4500) * 0.01  # yields 50 -> ~95
+    closes = _generate_price_series(seed+1, start_price, days, mu=0.0003, sigma=0.02)
+    dates = []
+    today = datetime.utcnow().date()
+    # generate business day dates backwards
+    dt = today
+    while len(dates) < days:
+        if dt.weekday() < 5:
+            dates.append(dt)
+        dt = dt - timedelta(days=1)
+    dates = list(reversed(dates))  # oldest -> newest
+    df = pd.DataFrame({"Date": pd.to_datetime(dates)})
+    # make OHLC around close with small intraday noise
+    rng = np.random.RandomState(seed+2)
+    opens = closes * (1 + rng.normal(0, 0.002, size=len(closes)))
+    highs = np.maximum(opens, closes) * (1 + np.abs(rng.normal(0, 0.008, size=len(closes))))
+    lows = np.minimum(opens, closes) * (1 - np.abs(rng.normal(0, 0.008, size=len(closes))))
+    volumes = (rng.normal(loc=5e6, scale=2e6, size=len(closes))).astype(int)
+    volumes = np.where(volumes < 1000, 1000, volumes)
+    df["Open"] = opens
+    df["High"] = highs
+    df["Low"] = lows
+    df["Close"] = closes
+    df["Volume"] = volumes
+    return _normalize_df(df)
+
+def _build_demo_intraday_df(symbol: str):
+    """Generate minute-level bars for the last trading day (around 390 minutes)"""
+    symbol = symbol.upper()
+    seed = _seed_from_string(symbol) + 1000
+    rng = np.random.RandomState(seed)
+    minutes = 390  # typical trading minutes
+    # base price from daily generator last close
+    daily = _build_demo_daily_df(symbol, years=1)
+    if daily is None or daily.empty:
+        base = 100.0
+    else:
+        base = float(daily["Close"].iloc[-1])
+    # generate minute returns
+    mu = 0.0
+    sigma = 0.0008
+    returns = rng.normal(loc=mu, scale=sigma, size=minutes)
+    prices = [base]
+    for r in returns:
+        prices.append(max(0.01, prices[-1] * math.exp(r)))
+    prices = prices[1:]
+    # timestamps: last trading day (use yesterday if weekend)
+    today = datetime.utcnow().date()
+    last_day = today
+    if last_day.weekday() >= 5:
+        # back up to previous Friday
+        offset = (last_day.weekday() - 4)
+        last_day = last_day - timedelta(days=offset)
+    # trading window: 9:15 to 15:30 ~ 6h15 = 375min; we'll use 390 for simplicity
+    start_dt = datetime.combine(last_day, datetime.min.time()) + timedelta(hours=9, minutes=15)
+    times = [start_dt + timedelta(minutes=i) for i in range(minutes)]
+    df = pd.DataFrame({"Date": times})
+    rng2 = np.random.RandomState(seed+2)
+    opens = np.array(prices) * (1 + rng2.normal(0, 0.0005, size=len(prices)))
+    highs = np.maximum(opens, prices) * (1 + np.abs(rng2.normal(0, 0.0015, size=len(prices))))
+    lows = np.minimum(opens, prices) * (1 - np.abs(rng2.normal(0, 0.0015, size=len(prices))))
+    volumes = (rng2.normal(loc=2000, scale=800, size=len(prices))).astype(int)
+    volumes = np.where(volumes < 1, 1, volumes)
+    df["Open"] = opens
+    df["High"] = highs
+    df["Low"] = lows
+    df["Close"] = prices
+    df["Volume"] = volumes
+    return _normalize_df(df)
+
+# -------------------------
+# DEMO cache for speed
+# -------------------------
+_DEMO_DAILY_CACHE = {}
+_DEMO_INTRADAY_CACHE = {}
+
+def _get_demo(symbol: str, period="6mo", interval="1d"):
+    s = clean_ticker(symbol)
+    # if user asked intraday
+    if interval.endswith("m") or interval in ("1m","5m","15m"):
+        if s not in _DEMO_INTRADAY_CACHE:
+            _DEMO_INTRADAY_CACHE[s] = _build_demo_intraday_df(s)
+        return _DEMO_INTRADAY_CACHE[s]
+    # otherwise daily
+    # we generate 5-year daily and then slice according to period
+    if s not in _DEMO_DAILY_CACHE:
+        _DEMO_DAILY_CACHE[s] = _build_demo_daily_df(s, years=5)
+    df = _DEMO_DAILY_CACHE[s]
+    # slice for period
+    days = _period_to_days(period)
+    # take last `days` trading days (approx)
+    try:
+        last = df.tail(days)
+        if last.empty:
+            return df
+        return last.reset_index(drop=True)
+    except Exception:
+        return df
+
+# -------------------------
+# MoneyControl master resolver (lightweight)
 # -------------------------
 @lru_cache(maxsize=1)
 def build_moneycontrol_master():
-    """
-    Attempt to create a mapping of many Indian stocks to MoneyControl codes.
-    Strategy:
-      1. Try priceapi index endpoints (if available)
-      2. Use autosuggest for frequent symbols (on-demand)
-      3. If available, use a public symbol listing endpoint
-    Returns: dict with keys: symbol -> best_match_code (string)
-    """
     master = {}
-    # Try a few known MoneyControl index endpoints that sometimes include listings
+    # attempt to fetch priceapi lists (best-effort)
     endpoints = [
         "https://priceapi.moneycontrol.com/pricefeed/bse/equitycash",
         "https://priceapi.moneycontrol.com/pricefeed/nse/equitycash",
-        "https://priceapi.moneycontrol.com/pricefeed/stocklist"  # best-effort
+        "https://priceapi.moneycontrol.com/pricefeed/stocklist"
     ]
     for url in endpoints:
         try:
-            r = requests.get(url, timeout=8)
+            r = requests.get(url, timeout=6)
             if r.status_code != 200:
                 continue
-            try:
-                data = r.json()
-            except Exception:
-                continue
-            # data is probably dict containing many entries; try to extract mapping
-            # Search recursively for dicts that have 'code' or 'sc_id' and 'symbol' or 'name'
+            data = r.json()
             def walk(d):
                 if isinstance(d, dict):
-                    keys = set(d.keys())
-                    if ("scode" in keys or "scid" in keys or "sc_id" in keys or "code" in keys) and ("symbol" in keys or "name" in keys or "company" in keys or "scrip" in keys):
-                        # extract possible keys
+                    keys = set(k.lower() for k in d.keys())
+                    if ("scode" in keys or "scid" in keys or "sc_id" in keys or "code" in keys) and ("symbol" in keys or "name" in keys or "company" in keys):
                         code = d.get("scode") or d.get("scid") or d.get("sc_id") or d.get("code")
-                        symbol = d.get("symbol") or d.get("name") or d.get("company") or d.get("scrip")
+                        symbol = d.get("symbol") or d.get("name") or d.get("company")
                         try:
                             if code and symbol:
                                 master[str(symbol).upper()] = str(code)
@@ -357,86 +421,41 @@ def build_moneycontrol_master():
                         walk(item)
             walk(data)
         except Exception:
-            pass
-
-    # If master still empty, seed with common tickers via autosuggest for popular names
-    popular = ["RELIANCE","TCS","INFY","HDFCBANK","SBIN","ICICIBANK","AXISBANK","LT","BHARTIARTL","ITC","HINDUNILVR","MARUTI","BAJAJ-AUTO","ONGC","BPCL","IOC","NTPC","ADANIENT","ADANIPORTS","BDL"]
-    for sym in popular:
-        try:
-            results = _moneycontrol_autosuggest(sym)
-            for it in results:
-                if isinstance(it, dict):
-                    # try many possible keys
-                    code = it.get("scode") or it.get("scid") or it.get("id") or it.get("sCode")
-                    name = it.get("name") or it.get("label") or it.get("value") or it.get("symbol")
-                    url = it.get("url") or it.get("link")
-                    if not code and isinstance(url, str):
-                        # sometimes url ends with code or slug
-                        code = url.rstrip("/").split("/")[-1]
-                    if code and name:
-                        master[str(name).upper()] = str(code)
-                        master[str(code).upper()] = str(code)
-        except Exception:
-            pass
-
+            continue
+    # seed master with demo symbols
+    for sym in DEMO_SYMBOLS:
+        master.setdefault(sym.upper(), sym.upper())
     return master
 
-# -------------------------
-# Resolve to MoneyControl code (best-effort)
-# -------------------------
 def resolve_moneycontrol_code(symbol: str):
-    """
-    Returns a MoneyControl code (string) for given symbol/name/BSE-code, or None.
-    Uses master mapping first, then autosuggest as fallback.
-    """
     if not symbol:
         return None
     s = clean_ticker(symbol)
     master = build_moneycontrol_master()
-    # direct lookup
     if s in master:
         return master[s]
-    # try more aggressive matching (name contains, etc.)
-    for k, v in master.items():
+    for k,v in master.items():
         if k and s and (s in k or k in s):
             return v
-    # fallback to autosuggest
-    try:
-        results = _moneycontrol_autosuggest(s)
-        for it in results:
-            if isinstance(it, dict):
-                code = it.get("scode") or it.get("scid") or it.get("id") or it.get("sCode")
-                url = it.get("url") or it.get("link")
-                name = it.get("name") or it.get("label") or it.get("value")
-                if not code and isinstance(url, str):
-                    code = url.rstrip("/").split("/")[-1]
-                if code:
-                    # update master for future
-                    try:
-                        build_moneycontrol_master.cache_clear()
-                    except:
-                        pass
-                    return str(code)
-    except Exception:
-        pass
+    results = _moneycontrol_autosuggest(s)
+    for it in results:
+        if isinstance(it, dict):
+            code = it.get("scode") or it.get("scid") or it.get("id") or it.get("sCode")
+            url = it.get("url") or it.get("link")
+            if not code and isinstance(url,str):
+                code = url.rstrip("/").split("/")[-1]
+            if code:
+                return str(code)
     return None
 
 # -------------------------
-# get_best_ticker: tries all sources
+# Main resolver: try live sources, fallback to demo
 # -------------------------
 def get_best_ticker(symbol, period="6mo", interval="1d"):
-    """
-    Tries (in order):
-      1) yfinance attempts with candidate tickers
-      2) Yahoo CSV direct download
-      3) MoneyControl lookup & fetch
-    Returns (source_identifier, normalized_dataframe) or (None,None)
-    """
     if not symbol:
         return None, None
-
     candidates = resolve_ticker_candidates(symbol)
-    # 1) yfinance
+    # 1) try yfinance
     for t in candidates:
         try:
             df = _yf_download(t, period, interval)
@@ -445,7 +464,6 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
                 return t, df
         except Exception:
             continue
-
     # 2) yahoo csv fallback
     for t in candidates:
         try:
@@ -455,21 +473,27 @@ def get_best_ticker(symbol, period="6mo", interval="1d"):
                 return t, df2
         except Exception:
             continue
-
     # 3) MoneyControl fallback
     try:
-        mc_code = resolve_moneycontrol_code(symbol)
-        if mc_code:
-            dfmc = _moneycontrol_historical_by_code(mc_code, period=period, interval=interval)
+        mc = resolve_moneycontrol_code(symbol)
+        if mc:
+            dfmc = _moneycontrol_historical_by_code(mc, period=period, interval=interval)
+            dfmc = _normalize_df(dfmc)
             if dfmc is not None:
-                return mc_code, dfmc
+                return mc, dfmc
     except Exception:
         pass
-
+    # 4) DEMO fallback (guaranteed)
+    try:
+        demo = _get_demo(symbol, period=period, interval=interval)
+        if demo is not None:
+            return f"DEMO:{clean_ticker(symbol)}", demo
+    except Exception:
+        pass
     return None, None
 
 # -------------------------
-# Public API functions used by frontend
+# Public functions used by frontend
 # -------------------------
 def get_stock_data(symbol: str, period="6mo", interval="1d"):
     _, df = get_best_ticker(symbol, period, interval)
@@ -483,10 +507,10 @@ def get_today_high_low(symbol: str, prefer_intraday=True):
     t, df = get_best_ticker(symbol, "1d", "1m" if prefer_intraday else "1d")
     if df is None or df.empty:
         return None
-    df2 = df.dropna(subset=["Close"])
-    if df2.empty:
+    d = df.dropna(subset=["Close"])
+    if d.empty:
         return None
-    return {"high": float(df2["High"].max()), "low": float(df2["Low"].min()), "timestamp": df2["Date"].iloc[-1]}
+    return {"high": float(d["High"].max()), "low": float(d["Low"].min()), "timestamp": d["Date"].iloc[-1]}
 
 @lru_cache(maxsize=128)
 def stock_summary(symbol: str, period="6mo", interval="1d"):
@@ -508,14 +532,14 @@ import feedparser
 def fetch_news_via_google_rss(query: str, max_items: int = 10):
     url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
-    articles = []
+    out = []
     for entry in feed.entries[:max_items]:
         try:
             pub = datetime(*entry.published_parsed[:6])
         except Exception:
             pub = datetime.utcnow()
-        articles.append({"title": entry.title, "link": entry.link, "published": pub})
-    return articles
+        out.append({"title": entry.title, "link": entry.link, "published": pub})
+    return out
 
 def analyze_headlines_sentiment(articles):
     if sentiment_analyzer is None:
@@ -531,7 +555,7 @@ def analyze_headlines_sentiment(articles):
     return out
 
 # -------------------------
-# GitHub / ArXiv helpers (lightweight)
+# Lightweight GitHub / ArXiv helpers
 # -------------------------
 def fetch_github_trending(language=None, since="daily"):
     try:
@@ -539,7 +563,7 @@ def fetch_github_trending(language=None, since="daily"):
         r = requests.get(url, timeout=8)
         if r.status_code != 200:
             return []
-        soup = BeautifulSoup(r.text, "lxml")
+        soup = BeautifulSoup(r.text,"lxml")
         repos = []
         for repo in soup.select("article.Box-row")[:20]:
             title_tag = repo.find(["h1","h2"])
@@ -562,10 +586,10 @@ def fetch_arxiv_papers(query, max_results=5):
         if r.status_code != 200:
             return []
         soup = BeautifulSoup(r.text, "xml")
-        papers=[]
+        out = []
         for entry in soup.find_all("entry")[:max_results]:
-            papers.append({"title": entry.title.get_text(strip=True), "summary": entry.summary.get_text(strip=True), "link": entry.id.get_text(strip=True)})
-        return papers
+            out.append({"title": entry.title.get_text(strip=True), "summary": entry.summary.get_text(strip=True), "link": entry.id.get_text(strip=True)})
+        return out
     except Exception:
         return []
 
