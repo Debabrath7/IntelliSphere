@@ -1,16 +1,17 @@
 # frontend.py
-# IntelliSphere - Frontend (intraday auto-switch for 1d + UI fixes)
+# IntelliSphere - Frontend (dark mode, intraday auto-switch for 1d)
 # Author: adapted for Debabrath
+# Replace your existing frontend.py with this file.
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timezone
+from datetime import datetime
 from dateutil import tz
 
-# backend helpers (ensure backend_modules.py is the deployed one)
+# backend imports (must match backend_modules.py)
 import backend_modules as bm
 from backend_modules import (
     get_stock_data,
@@ -18,9 +19,10 @@ from backend_modules import (
     get_today_high_low,
     fetch_github_trending,
     fetch_arxiv_papers,
-    get_news as bm_get_news,
+    fetch_news_via_google_rss,
     analyze_headlines_sentiment,
-    stock_summary
+    stock_summary,
+    resolve_ticker_candidates
 )
 
 # Page config
@@ -41,10 +43,11 @@ h1,h2,h3{color:#e6eef6}
 .metric-sub{color:#9aa3ad;font-size:13px;margin-top:6px}
 .divider{height:1px;background:#0b1220;margin:14px 0;border-radius:2px}
 .muted{color:#9aa3ad;font-size:13px}
+.small-muted{color:#9aa3ad;font-size:12px}
 </style>
 """, unsafe_allow_html=True)
 
-# Header (simple, no white big card)
+# Header
 def header_bar():
     st.markdown('<div class="topbar">', unsafe_allow_html=True)
     st.markdown('<div class="brand"><div class="logo">IS</div><div><div style="font-weight:700;font-size:20px;color:#e6eef6">IntelliSphere</div><div class="muted" style="font-size:12px;margin-top:2px">AI-Powered Insights</div></div></div>', unsafe_allow_html=True)
@@ -62,19 +65,6 @@ def humanize_number(num):
     if n >= 1e5: return f"{num/1e5:.2f} L"
     if n >= 1e3: return f"{num/1e3:.2f} K"
     return f"{num:.2f}"
-
-def format_dividend(div_y):
-    if div_y is None:
-        return "N/A"
-    try:
-        d = float(div_y)
-    except Exception:
-        return "N/A"
-    if d == 0: return "0.00%"
-    if 0 < d < 0.5: pct = d*100
-    elif 0.5 <= d <= 100: pct = d
-    else: pct = d/100.0
-    return f"{pct:.2f}%"
 
 def ensure_date_col(df):
     if df is None:
@@ -94,12 +84,6 @@ def ensure_date_col(df):
             pass
     return df
 
-def compute_sma(series, window=50):
-    try:
-        return series.rolling(window).mean()
-    except Exception:
-        return None
-
 def compute_rsi(series, n=14):
     s = series.dropna()
     if len(s) < n+1: return None
@@ -113,7 +97,7 @@ def compute_rsi(series, n=14):
 # Stocks page
 def render_stock():
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("## Stock Dashboard")
+    st.markdown("## Stock Dashboard", unsafe_allow_html=True)
 
     c1,c2,c3,c4 = st.columns([3,2,2,2])
     with c1:
@@ -137,7 +121,7 @@ def render_stock():
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # AUTO-SWITCH: if timeframe == "1d", use intraday 1m
+    # AUTO-SWITCH: if timeframe == "1d", request intraday 1m
     if timeframe == "1d":
         period = "1d"
         interval = "1m"
@@ -147,9 +131,8 @@ def render_stock():
         interval = "1d"
         use_intraday = False
 
-    # Fetch data using backend; backend supports intraday via get_intraday_data
+    # Fetch data using backend
     df = None
-    source_used = None
     try:
         if use_intraday:
             df = get_intraday_data(sym, interval=interval, period=period)
@@ -158,17 +141,22 @@ def render_stock():
     except Exception:
         df = None
 
-    # If backend returned None try MoneyControl resolver via stock_summary
-    if df is None:
+    # If none, try demo fallback via backend again (backend handles demo)
+    if df is None or (hasattr(df,"empty") and df.empty):
         st.warning("Live sources unavailable — loading demo data.")
-        df = get_intraday_data(sym, interval=interval, period=period) if use_intraday else get_stock_data(sym, period=period, interval=interval)
+        try:
+            if use_intraday:
+                df = get_intraday_data(sym, interval=interval, period=period)
+            else:
+                df = get_stock_data(sym, period=period, interval=interval)
+        except Exception:
+            df = None
 
     if df is None or (hasattr(df,"empty") and df.empty):
         st.error("No data available for provided symbol. Try a demo symbol (e.g., RELIANCE, TCS).")
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    # normalize
     df = ensure_date_col(df)
     if not isinstance(df, pd.DataFrame):
         try:
@@ -185,7 +173,7 @@ def render_stock():
 
     df = df.sort_values("Date").reset_index(drop=True)
 
-    # scalars
+    # Scalars
     try:
         latest_price = float(df["Close"].dropna().iloc[-1])
     except Exception:
@@ -195,10 +183,9 @@ def render_stock():
     except Exception:
         today_vol = 0
 
-    # compute 52-week based on last 252 trading days if daily, else use daily resampled
+    # 52-week: try backend daily 1y if intraday
     try:
         if use_intraday:
-            # get demo/daily baseline from backend (1y)
             df1y = get_stock_data(sym, period="1y", interval="1d")
         else:
             df1y = df.copy()
@@ -213,18 +200,14 @@ def render_stock():
     # SMA50
     try:
         if use_intraday:
-            # use last 50 minutes SMA if intraday available
-            if len(df["Close"].dropna()) >= 50:
-                sma50_val = float(df["Close"].dropna().rolling(50).mean().iloc[-1])
-            else:
-                sma50_val = None
+            sma50_val = float(df["Close"].dropna().rolling(50).mean().iloc[-1]) if len(df["Close"].dropna())>=50 else None
         else:
             df_daily = df.set_index("Date").resample("D").last().dropna()
             sma50_val = float(df_daily["Close"].rolling(50).mean().iloc[-1]) if len(df_daily)>=50 else None
     except Exception:
         sma50_val = None
 
-    # RSI compute on appropriate series (intraday or daily close)
+    # RSI
     try:
         if use_intraday:
             rsi_series = compute_rsi(df["Close"].dropna(), n=14)
@@ -237,19 +220,19 @@ def render_stock():
         day_rsi = None
 
     # Top metric cards
-    cols_top = st.columns(4)
-    cols_top[0].markdown(f"<div class='card'><div class='metric-title'>Current Price</div><div class='metric-value'>{('₹'+format(latest_price,',.2f')) if latest_price else 'N/A'}</div></div>", unsafe_allow_html=True)
-    cols_top[1].markdown(f"<div class='card'><div class='metric-title'>Today's H / L</div><div class='metric-value'>{('₹'+format(float(df['High'].max()),',.2f')) if not df['High'].isna().all() else 'N/A'} / {('₹'+format(float(df['Low'].min()),',.2f')) if not df['Low'].isna().all() else 'N/A'}</div></div>", unsafe_allow_html=True)
-    cols_top[2].markdown(f"<div class='card'><div class='metric-title'>52W High</div><div class='metric-value'>{('₹'+format(hi52,',.2f')) if hi52 else 'N/A'}</div></div>", unsafe_allow_html=True)
-    cols_top[3].markdown(f"<div class='card'><div class='metric-title'>52W Low</div><div class='metric-value'>{('₹'+format(lo52,',.2f')) if lo52 else 'N/A'}</div></div>", unsafe_allow_html=True)
+    ct1,ct2,ct3,ct4 = st.columns(4)
+    ct1.markdown(f"<div class='card'><div class='metric-title'>Current Price</div><div class='metric-value'>{('₹'+format(latest_price,',.2f')) if latest_price else 'N/A'}</div></div>", unsafe_allow_html=True)
+    ct2.markdown(f"<div class='card'><div class='metric-title'>Today's H / L</div><div class='metric-value'>{('₹'+format(float(df['High'].max()),',.2f')) if not df['High'].isna().all() else 'N/A'} / {('₹'+format(float(df['Low'].min()),',.2f')) if not df['Low'].isna().all() else 'N/A'}</div></div>", unsafe_allow_html=True)
+    ct3.markdown(f"<div class='card'><div class='metric-title'>52W High</div><div class='metric-value'>{('₹'+format(hi52,',.2f')) if hi52 else 'N/A'}</div></div>", unsafe_allow_html=True)
+    ct4.markdown(f"<div class='card'><div class='metric-title'>52W Low</div><div class='metric-value'>{('₹'+format(lo52,',.2f')) if lo52 else 'N/A'}</div></div>", unsafe_allow_html=True)
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    # Chart area
+    # Chart + right panel
     left, right = st.columns([3,1])
     with left:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown(f"### {sym}")
+        st.markdown(f"### {sym}", unsafe_allow_html=True)
 
         df_plot = df.copy()
         if df_plot.empty:
@@ -257,22 +240,21 @@ def render_stock():
             st.markdown("</div>", unsafe_allow_html=True)
             return
 
-        # If intraday and timeframe 1d, allow candlestick using minute bars
+        # Plot
         try:
             if chart_type == "Candlestick":
                 fig = go.Figure(data=[go.Candlestick(x=df_plot["Date"], open=df_plot["Open"], high=df_plot["High"], low=df_plot["Low"], close=df_plot["Close"], name="Price")])
             else:
                 fig = px.line(df_plot, x="Date", y="Close", title=f"{sym} Price", markers=False)
 
-            # Add SMA if present (for intraday or daily)
+            # Add SMA (series or single value)
             if sma50_val is not None:
-                # If intraday: compute SMA series for plotting
                 if use_intraday:
                     sma_series = df_plot["Close"].rolling(50).mean()
                     fig.add_scatter(x=df_plot["Date"], y=sma_series, mode="lines", name="SMA50", line=dict(width=1))
                 else:
                     df_daily = df_plot.set_index("Date").resample("D").last().dropna()
-                    if len(df_daily)>=50:
+                    if len(df_daily) >= 50:
                         fig.add_scatter(x=df_daily.index, y=df_daily["Close"].rolling(50).mean(), mode="lines", name="SMA50", line=dict(width=1))
 
             fig.update_layout(template="plotly_dark", height=480, margin=dict(l=10,r=10,t=40,b=10))
@@ -280,7 +262,7 @@ def render_stock():
         except Exception as e:
             st.error("Could not render chart: " + str(e))
 
-        # Indicators area (MACD/RSI)
+        # Indicators expander
         with st.expander("Indicators"):
             if "RSI" in overlays:
                 if day_rsi is not None:
@@ -311,7 +293,7 @@ def render_stock():
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# Other pages (unchanged, minimal)
+# Minimal other pages
 def render_trends():
     st.markdown("<div class='card'><h2>Trends</h2></div>", unsafe_allow_html=True)
     lang = st.text_input("Language or topic:", "python")
@@ -337,19 +319,16 @@ def render_research():
         else:
             for p in papers:
                 st.subheader(p["title"])
-                st.caption(", ".join(p.get("authors",[])) if isinstance(p.get("authors",[]), list) else "")
                 st.write(p["summary"][:600] + "...")
                 st.markdown(f"[Read more]({p['link']})")
                 st.divider()
 
 def render_news():
     st.markdown("<div class='card'><h2>News & Sentiment</h2></div>", unsafe_allow_html=True)
-    query = st.text_input("Enter topic or company:", "Indian Stock Market")
-    num_articles = st.slider("Num articles:", 3, 15, 6)
-    if st.button("Get News"):
-        with st.spinner("Fetching news..."):
-            arts = bm_get_news(query, max_items=num_articles)
-            sents = analyze_headlines_sentiment(arts)
+    q = st.text_input("Topic","market")
+    if st.button("Get"):
+        arts = fetch_news_via_google_rss(q, max_items=8)
+        sents = analyze_headlines_sentiment(arts)
         for a in sents:
             col1,col2 = st.columns([4,1])
             with col1:
