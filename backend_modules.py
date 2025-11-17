@@ -35,7 +35,6 @@ except Exception:
 
 # -------------------------
 # DEMO: 20 stocks & realistic baseline prices (approx current market levels)
-# (These baseline numbers are realistic approximations to make demo look believable)
 # -------------------------
 DEMO_SYMBOLS = [
     "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","SBIN","KOTAKBANK","ASIANPAINT",
@@ -43,27 +42,28 @@ DEMO_SYMBOLS = [
     "HINDUNILVR","AXISBANK","BAJAJFINSV","POWERGRID"
 ]
 
+# Updated baseline prices (Nov 2025 approximate)
 BASELINE_PRICES = {
-    "RELIANCE": 2600.0,
-    "TCS": 3500.0,
-    "INFY": 1500.0,
-    "HDFCBANK": 1650.0,
-    "ICICIBANK": 1000.0,
-    "SBIN": 700.0,
-    "KOTAKBANK": 1800.0,
-    "ASIANPAINT": 4200.0,
-    "ITC": 470.0,
-    "LT": 3600.0,
-    "BHARTIARTL": 900.0,
-    "ULTRACEMCO": 9000.0,
-    "WIPRO": 450.0,
-    "HCLTECH": 1200.0,
-    "MARUTI": 12000.0,
-    "TECHM": 1200.0,
-    "HINDUNILVR": 2600.0,
-    "AXISBANK": 1200.0,
-    "BAJAJFINSV": 13500.0,
-    "POWERGRID": 320.0
+    "RELIANCE": 2885.0,
+    "TCS": 4120.0,
+    "INFY": 1635.0,
+    "HDFCBANK": 1592.0,
+    "ICICIBANK": 1125.0,
+    "SBIN": 791.0,
+    "KOTAKBANK": 1878.0,
+    "ASIANPAINT": 3305.0,
+    "ITC": 453.0,
+    "LT": 3950.0,
+    "BHARTIARTL": 1285.0,
+    "ULTRACEMCO": 9980.0,
+    "WIPRO": 448.0,
+    "HCLTECH": 1705.0,
+    "MARUTI": 121500.0,
+    "TECHM": 1510.0,
+    "HINDUNILVR": 2520.0,
+    "AXISBANK": 1245.0,
+    "BAJAJFINSV": 17400.0,
+    "POWERGRID": 298.0
 }
 
 # -------------------------
@@ -169,7 +169,7 @@ def _yahoo_csv_download(ticker, period="6mo", interval="1d"):
         return None
 
 # -------------------------
-# MoneyControl (best-effort) - simple autosuggest and fetch
+# MoneyControl (best-effort)
 # -------------------------
 def _moneycontrol_autosuggest(q: str):
     try:
@@ -300,10 +300,9 @@ def _build_demo_daily_df(symbol: str, years: int = 5):
     symbol = symbol.upper()
     seed = _seed_from_string(symbol)
     days = years * 252
-    # Use baseline price if available, else scale from seed
     baseline = BASELINE_PRICES.get(symbol, None)
     if baseline is not None:
-        start_price = baseline * 0.65  # start earlier lower to allow realistic growth/volatility
+        start_price = baseline * 0.65
         mu = 0.00025
         sigma = 0.018
     else:
@@ -311,11 +310,9 @@ def _build_demo_daily_df(symbol: str, years: int = 5):
         mu = 0.0003
         sigma = 0.02
     closes = _generate_price_series(seed+1, start_price, days, mu=mu, sigma=sigma)
-    # shift series so last close matches baseline if baseline available
     if baseline is not None:
         factor = baseline / float(closes[-1])
         closes = closes * factor
-    # generate dates (business days)
     dates = []
     today = datetime.utcnow().date()
     dt = today
@@ -598,5 +595,3 @@ def fetch_arxiv_papers(query, max_results=5):
         return out
     except Exception:
         return []
-
-# ========================= END FILE =========================
