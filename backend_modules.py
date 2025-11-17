@@ -332,3 +332,34 @@ def fetch_github_trending(language=None):
 
 def fetch_arxiv_papers(q, max_results=5):
     return []
+
+@lru_cache(maxsize=256)
+def stock_summary(symbol: str, period="6mo", interval="1d"):
+    """
+    Safe summary function for frontend.
+    Always returns a clean summary dict or None.
+    Works with yfinance, Yahoo CSV, MoneyControl & DEMO.
+    """
+    _, df = get_best_ticker(symbol, period, interval)
+    if df is None or df.empty:
+        return None
+
+    try:
+        first = float(df["Close"].dropna().iloc[0])
+        last = float(df["Close"].dropna().iloc[-1])
+        pct = (last - first) / (first + 1e-9) * 100
+        high = float(df["High"].max())
+        low = float(df["Low"].min())
+
+        return {
+            "symbol": symbol,
+            "first_close": first,
+            "latest_close": last,
+            "pct_change": pct,
+            "high": high,
+            "low": low
+        }
+    except:
+        return None
+
+
