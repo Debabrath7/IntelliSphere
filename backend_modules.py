@@ -1,6 +1,6 @@
 # ==========================================================
-# backend_modules.py — Data helpers & safe wrappers
-# Author: Debabrath (refactor)
+# backend_modules.py 
+# Author: Debabrath 
 # ==========================================================
 import warnings
 warnings.filterwarnings("ignore")
@@ -10,189 +10,266 @@ import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from bs4 import BeautifulSoup
 import feedparser
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
 
-# Optional: transformers for sentiment (kept but optional)
+# -------- Sentiment (optional) ----------
 try:
     from transformers import pipeline
     try:
         sentiment_analyzer = pipeline("sentiment-analysis", model="cardiffnlp/twitter-roberta-base-sentiment")
-    except Exception:
-        try:
-            sentiment_analyzer = pipeline("sentiment-analysis")
-        except Exception:
-            sentiment_analyzer = None
-except Exception:
+    except:
+        sentiment_analyzer = pipeline("sentiment-analysis")
+except:
     sentiment_analyzer = None
 
-# -------------------------
-# Utilities
-# -------------------------
+
+# ==========================================================
+# CLEAN / NORMALIZE TICKER
+# ==========================================================
 def clean_ticker(ticker: str) -> str:
     """Normalize tickers: remove .NS/.BO and whitespace, keep upper-case."""
     if not isinstance(ticker, str):
         return ticker
-    s = ticker.strip()
-    # Accept inputs like "541143" (BSE numeric) and return as-is
-    # Remove common suffixes
-    for suf in [".NS", ":NS", ".BO", ":BO", " NS", " BO"]:
-        if s.upper().endswith(suf):
-            s = s[: -len(suf)]
-    return s.strip().upper()
+    s = ticker.strip().upper()
 
-def safe_get(url, headers=None, params=None, timeout=10):
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=timeout)
-        r.raise_for_status()
-        return r
-    except Exception:
-        return None
+    # remove suffixes
+    for suf in [".NS", ".BO", ":NS", ":BO"]:
+        if s.endswith(suf):
+            s = s.replace(suf, "")
+    return s.strip()
 
-# -------------------------
-# Stock data fetchers
-# -------------------------
+
+# ==========================================================
+# GENERATE MULTIPLE POSSIBLE TICKER OPTIONS
+# ==========================================================
+def resolve_ticker_candidates(symbol: str):
+    """
+    Converts simple inputs into multiple valid possible NSE/BSE tickers.
+    Example:
+        "BDL" → ["BDL.NS", "BDL.BO", "BDL"]
+        "TCS" → ["TCS.NS", "TCS.BO", "TCS"]
+        "541143" → ["541143.BO", "541143"]
+    """
+    symbol = clean_ticker(symbol)
+
+    candidates = []
+
+    # If user enters numeric → BSE code (e.g., "541143")
+    if symbol.isdigit():
+        candidates = [f"{symbol}.BO", symbol]
+        return candidates
+
+    # Otherwise treat as NSE/BSE symbol
+    candidates = [
+        f"{symbol}.NS",
+        f"{symbol}.BO",
+        f"{symbol}"       # last fallback
+    ]
+    return candidates
+
+
+# ==========================================================
+# NORMALIZE DOWNLOADED DF
+# ==========================================================
 def _normalize_df(df):
-    """Return df with Date/Datetime normalization and expected columns."""
-    if df is None:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return None
+
     df = df.copy()
-    # reset index
-    if not isinstance(df, pd.DataFrame):
-        return None
+
+    # Ensure Date column
     if "Datetime" in df.columns and "Date" not in df.columns:
         df = df.rename(columns={"Datetime": "Date"})
     if "Date" not in df.columns:
         df = df.reset_index()
         if "index" in df.columns:
             df = df.rename(columns={"index": "Date"})
-    # coerce to datetime
+
     try:
         df["Date"] = pd.to_datetime(df["Date"])
-    except Exception:
+    except:
         pass
-    # ensure OHLCV exist
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
-        if c not in df.columns:
-            df[c] = np.nan
-    return df[["Date", "Open", "High", "Low", "Close", "Volume"]]
 
-def get_stock_data(ticker: str, period: str = "6mo", interval: str = "1d"):
-    """
-    Download stock data using yfinance.
-    ticker: e.g. 'RELIANCE.NS' or '541143.BO' or 'RELIANCE'
-    period: '1d','5d','1mo','3mo','6mo','1y','2y','5y'
-    interval: '1m','2m','5m','15m','30m','60m','1d'
-    """
+    # Ensure OHLCV columns
+    for col in ["Open","High","Low","Close","Volume"]:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    return df[["Date","Open","High","Low","Close","Volume"]]
+
+
+# ==========================================================
+# yfinance wrapper with retry
+# ==========================================================
+def _yf_download(ticker, period, interval):
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False, threads=True, auto_adjust=False)
-    except Exception:
-        # retry once with small delay
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=False,
+            threads=True,
+        )
+        if df is None or df.empty:
+            return None
+        return df.reset_index()
+    except:
+        # Retry once
         try:
             time.sleep(0.8)
-            df = yf.download(ticker, period=period, interval=interval, progress=False, threads=True, auto_adjust=False)
-        except Exception:
+            df = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                threads=True,
+            )
+            if df is None or df.empty:
+                return None
+            return df.reset_index()
+        except:
             return None
+
+
+# ==========================================================
+# FIND BEST AVAILABLE TICKER
+# ==========================================================
+def get_best_ticker(symbol, period="1d", interval="1m"):
+    """
+    Tries all possible tickers (NS/BO/raw).
+    Returns the FIRST working ticker + dataframe.
+    """
+    for t in resolve_ticker_candidates(symbol):
+        df = _yf_download(t, period, interval)
+        df = _normalize_df(df)
+        if df is not None and not df.empty:
+            return t, df
+    return None, None
+
+
+# ==========================================================
+# MAIN STOCK FETCH FUNCTIONS
+# ==========================================================
+def get_stock_data(symbol: str, period="6mo", interval="1d"):
+    """
+    Auto-resolves best working ticker from NSE/BSE.
+    """
+    ticker, df = get_best_ticker(symbol, period, interval)
+    return df
+
+
+def get_intraday_data(symbol: str, interval="1m", period="1d"):
+    """
+    Intraday version.
+    """
+    ticker, df = get_best_ticker(symbol, period, interval)
+    return df
+
+
+# ==========================================================
+# TODAY'S HIGH / LOW
+# ==========================================================
+def get_today_high_low(symbol: str):
+    ticker, df = get_best_ticker(symbol, "1d", "1m")
     if df is None or df.empty:
         return None
-    df = df.reset_index()
-    return _normalize_df(df)
+    df2 = df.dropna(subset=["Close"])
+    if df2.empty:
+        return None
+    return {
+        "high": float(df2["High"].max()),
+        "low": float(df2["Low"].min()),
+        "timestamp": df2["Date"].iloc[-1]
+    }
 
-def get_intraday_data(ticker: str, interval: str = "1m", period: str = "1d"):
-    return get_stock_data(ticker, period=period, interval=interval)
 
-def get_today_high_low(ticker: str, prefer_intraday=True):
-    """
-    Returns dict: {'high':float,'low':float,'timestamp':datetime} or None
-    """
-    if prefer_intraday:
-        df = get_intraday_data(ticker, interval="1m", period="1d")
-        if df is not None and not df.empty:
-            df2 = df.dropna(subset=["Close"])
-            if not df2.empty:
-                return {"high": float(df2["High"].max()), "low": float(df2["Low"].min()), "timestamp": df2["Date"].iloc[-1]}
-    # fallback to daily
-    df = get_stock_data(ticker, period="5d", interval="1d")
-    if df is not None and not df.empty:
-        row = df.iloc[-1]
-        return {"high": float(row["High"]), "low": float(row["Low"]), "timestamp": row["Date"]}
-    return None
-
-# -------------------------
-# stock summary (safe)
-# -------------------------
+# ==========================================================
+# STOCK SUMMARY
+# ==========================================================
 @lru_cache(maxsize=128)
-def stock_summary(ticker: str, period: str = "6mo", interval: str = "1d"):
-    df = get_stock_data(ticker, period=period, interval=interval)
+def stock_summary(symbol: str, period="6mo", interval="1d"):
+    ticker, df = get_best_ticker(symbol, period, interval)
     if df is None or df.empty:
         return None
     try:
-        first = float(df["Close"].dropna().iloc[0])
-        last = float(df["Close"].dropna().iloc[-1])
-        pct = (last - first) / (first + 1e-9) * 100
-        return {"ticker": ticker, "first_close": first, "latest_close": last, "pct_change": pct, "recent": df.tail(30).to_dict(orient="records")}
-    except Exception:
+        first = float(df["Close"].iloc[0])
+        last = float(df["Close"].iloc[-1])
+        pct = (last-first)/(first+1e-9)*100
+        return {
+            "ticker": ticker,
+            "first_close": first,
+            "latest_close": last,
+            "pct_change": pct,
+            "recent": df.tail(30).to_dict("records")
+        }
+    except:
         return None
 
-# -------------------------
-# News & sentiment helpers (kept minimal)
-# -------------------------
-def fetch_news_via_google_rss(query: str, max_items: int = 10):
+
+# ==========================================================
+# NEWS + SENTIMENT (unchanged)
+# ==========================================================
+def fetch_news_via_google_rss(query, max_items=15):
     url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
-    articles = []
-    for entry in feed.entries[:max_items]:
+    out=[]
+    for e in feed.entries[:max_items]:
         try:
-            pub = datetime(*entry.published_parsed[:6])
-        except Exception:
+            pub = datetime(*e.published_parsed[:6])
+        except:
             pub = datetime.now()
-        articles.append({"title": entry.title, "link": entry.link, "published": pub})
-    return articles
+        out.append({"title": e.title, "link": e.link, "published": pub})
+    return out
 
 def analyze_headlines_sentiment(articles):
     if sentiment_analyzer is None:
-        return [{**a, "sentiment": None} for a in articles]
-    out = []
+        return [{**a,"sentiment": None} for a in articles]
+    res=[]
     for a in articles:
-        txt = a.get("title", "")[:512]
         try:
-            s = sentiment_analyzer(txt)[0]
-            out.append({**a, "sentiment": {"label": s.get("label"), "score": float(s.get("score", 0.0))}})
-        except Exception:
-            out.append({**a, "sentiment": None})
-    return out
+            s = sentiment_analyzer(a["title"][:512])[0]
+            res.append({**a,"sentiment":{"label": s["label"], "score": float(s["score"])}})
+        except:
+            res.append({**a,"sentiment": None})
+    return res
 
-# -------------------------
-# Misc: Github / ArXiv simple wrappers (kept as-is)
-# -------------------------
-def fetch_github_trending(language=None, since="daily"):
-    url = f"https://github.com/trending{f'/{language}' if language else ''}?since={since}"
-    r = safe_get(url)
-    if not r:
+
+# ==========================================================
+# GITHUB / ARXIV (unchanged)
+# ==========================================================
+def fetch_github_trending(lang=None):
+    url = f"https://github.com/trending/{lang}" if lang else "https://github.com/trending"
+    r = requests.get(url)
+    if r.status_code != 200:
         return []
     soup = BeautifulSoup(r.text, "lxml")
-    repos = []
-    for repo in soup.select("article.Box-row")[:20]:
-        title_tag = repo.find(["h1", "h2"])
-        if not title_tag:
-            continue
-        link_tag = title_tag.find("a")
-        name = link_tag.get("href","").strip("/") if link_tag else "unknown"
-        desc = (repo.find("p") or type("x",(),{"get_text":lambda *_:""})) .get_text(strip=True)
-        repos.append({"name": name, "description": desc})
-    return repos
+    out=[]
+    for row in soup.select("article.Box-row")[:20]:
+        a = row.find("a")
+        if not a: continue
+        name = a.get("href","").strip("/")
+        desc_tag = row.find("p")
+        desc = desc_tag.get_text(strip=True) if desc_tag else ""
+        out.append({"name":name,"description":desc})
+    return out
 
-def fetch_arxiv_papers(query, max_results=5):
+def fetch_arxiv_papers(q, max_results=5):
     base = "http://export.arxiv.org/api/query"
-    params = {"search_query": f"all:{query}", "start": 0, "max_results": max_results}
-    r = safe_get(base, params=params)
-    if not r:
+    params = {"search_query": f"all:{q}", "start":0,"max_results":max_results}
+    r = requests.get(base, params=params)
+    if r.status_code !=200:
         return []
-    soup = BeautifulSoup(r.text, features="xml")
-    papers=[]
-    for entry in soup.find_all("entry")[:max_results]:
-        papers.append({"title": entry.title.get_text(strip=True), "summary": entry.summary.get_text(strip=True), "link": entry.id.get_text(strip=True)})
-    return papers
+    soup = BeautifulSoup(r.text,"xml")
+    out=[]
+    for e in soup.find_all("entry")[:max_results]:
+        out.append({
+            "title": e.title.get_text(strip=True),
+            "summary": e.summary.get_text(strip=True),
+            "link": e.id.get_text(strip=True),
+        })
+    return out
