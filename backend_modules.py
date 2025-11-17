@@ -1,275 +1,291 @@
 # ==========================================================
 # backend_modules.py 
-# Author: Debabrath 
+# Author: Debabrath
 # ==========================================================
 import warnings
 warnings.filterwarnings("ignore")
 
 import time
+import io
 import requests
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import feedparser
-from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from functools import lru_cache
 
-# -------- Sentiment (optional) ----------
+# Optional sentiment (unchanged)
 try:
     from transformers import pipeline
     try:
         sentiment_analyzer = pipeline("sentiment-analysis", model="cardiffnlp/twitter-roberta-base-sentiment")
-    except:
-        sentiment_analyzer = pipeline("sentiment-analysis")
-except:
+    except Exception:
+        try:
+            sentiment_analyzer = pipeline("sentiment-analysis")
+        except Exception:
+            sentiment_analyzer = None
+except Exception:
     sentiment_analyzer = None
 
-
-# ==========================================================
-# CLEAN / NORMALIZE TICKER
-# ==========================================================
+# -------------------------
+# Utilities
+# -------------------------
 def clean_ticker(ticker: str) -> str:
-    """Normalize tickers: remove .NS/.BO and whitespace, keep upper-case."""
     if not isinstance(ticker, str):
         return ticker
     s = ticker.strip().upper()
-
-    # remove suffixes
     for suf in [".NS", ".BO", ":NS", ":BO"]:
         if s.endswith(suf):
             s = s.replace(suf, "")
     return s.strip()
 
-
-# ==========================================================
-# GENERATE MULTIPLE POSSIBLE TICKER OPTIONS
-# ==========================================================
 def resolve_ticker_candidates(symbol: str):
-    """
-    Converts simple inputs into multiple valid possible NSE/BSE tickers.
-    Example:
-        "BDL" → ["BDL.NS", "BDL.BO", "BDL"]
-        "TCS" → ["TCS.NS", "TCS.BO", "TCS"]
-        "541143" → ["541143.BO", "541143"]
-    """
-    symbol = clean_ticker(symbol)
+    """Return candidates: NSE (.NS), BSE (.BO), numeric BSE, raw."""
+    s = clean_ticker(symbol)
+    if not s:
+        return []
+    if s.isdigit():
+        return [f"{s}.BO", s]
+    return [f"{s}.NS", f"{s}.BO", s]
 
-    candidates = []
-
-    # If user enters numeric → BSE code (e.g., "541143")
-    if symbol.isdigit():
-        candidates = [f"{symbol}.BO", symbol]
-        return candidates
-
-    # Otherwise treat as NSE/BSE symbol
-    candidates = [
-        f"{symbol}.NS",
-        f"{symbol}.BO",
-        f"{symbol}"       # last fallback
-    ]
-    return candidates
-
-
-# ==========================================================
-# NORMALIZE DOWNLOADED DF
-# ==========================================================
 def _normalize_df(df):
+    """Return DataFrame with Date,Open,High,Low,Close,Volume or None."""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return None
-
     df = df.copy()
-
-    # Ensure Date column
+    # Normalize date column
     if "Datetime" in df.columns and "Date" not in df.columns:
         df = df.rename(columns={"Datetime": "Date"})
     if "Date" not in df.columns:
-        df = df.reset_index()
-        if "index" in df.columns:
-            df = df.rename(columns={"index": "Date"})
-
+        df = df.reset_index().rename(columns={"index":"Date"})
     try:
         df["Date"] = pd.to_datetime(df["Date"])
-    except:
+    except Exception:
         pass
-
-    # Ensure OHLCV columns
+    # Ensure OHLCV
     for col in ["Open","High","Low","Close","Volume"]:
         if col not in df.columns:
             df[col] = np.nan
+    # Keep only relevant columns
+    out = df.loc[:, ["Date","Open","High","Low","Close","Volume"]]
+    # drop rows with invalid dates or all NaNs in price
+    out = out.dropna(subset=["Date"])
+    if out.empty:
+        return None
+    return out
 
-    return df[["Date","Open","High","Low","Close","Volume"]]
-
-
-# ==========================================================
-# yfinance wrapper with retry
-# ==========================================================
+# -------------------------
+# yfinance download with retry
+# -------------------------
 def _yf_download(ticker, period, interval):
     try:
-        df = yf.download(
-            ticker,
-            period=period,
-            interval=interval,
-            progress=False,
-            auto_adjust=False,
-            threads=True,
-        )
+        df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False, threads=True)
         if df is None or df.empty:
             return None
         return df.reset_index()
-    except:
-        # Retry once
+    except Exception:
         try:
             time.sleep(0.8)
-            df = yf.download(
-                ticker,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=False,
-                threads=True,
-            )
+            df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=False, threads=True)
             if df is None or df.empty:
                 return None
             return df.reset_index()
-        except:
+        except Exception:
             return None
 
+# -------------------------
+# Yahoo CSV fallback
+# -------------------------
+_PERIOD_DAYS = {
+    "1d": 1,
+    "5d": 5,
+    "1mo": 30,
+    "3mo": 90,
+    "6mo": 182,
+    "1y": 365,
+    "2y": 365*2,
+    "5y": 365*5,
+    "10y": 365*10
+}
 
-# ==========================================================
-# FIND BEST AVAILABLE TICKER
-# ==========================================================
-def get_best_ticker(symbol, period="1d", interval="1m"):
+def _period_to_days(period):
+    # accept e.g. '6mo', '1y', '1d', or int days
+    if isinstance(period, int):
+        return period
+    p = str(period).lower()
+    if p in _PERIOD_DAYS:
+        return _PERIOD_DAYS[p]
+    # try parse like '6mo' or '3m'
+    if p.endswith("mo") or p.endswith("m"):
+        try:
+            return int(p.rstrip("mo").rstrip("m")) * 30
+        except:
+            pass
+    if p.endswith("y"):
+        try:
+            return int(p.rstrip("y")) * 365
+        except:
+            pass
+    # default 365
+    return 365
+
+def _yahoo_csv_download(ticker, period="6mo", interval="1d"):
     """
-    Tries all possible tickers (NS/BO/raw).
-    Returns the FIRST working ticker + dataframe.
+    Download historical CSV directly from Yahoo Finance:
+    query1.finance.yahoo.com/v7/finance/download/{ticker}
+    Params: period1, period2 (unix), interval
     """
-    for t in resolve_ticker_candidates(symbol):
+    try:
+        # compute timestamps
+        days = _period_to_days(period)
+        end = int(datetime.utcnow().timestamp())
+        start = int((datetime.utcnow() - timedelta(days=days)).timestamp())
+        params = {
+            "period1": start,
+            "period2": end,
+            "interval": interval,
+            "events": "history",
+            "includeAdjustedClose": "true"
+        }
+        url = f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}"
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        s = r.text
+        if not s or "404 Not Found" in s:
+            return None
+        df = pd.read_csv(io.StringIO(s), parse_dates=["Date"])
+        # Some CSVs contain 'null' or nonstandard; ensure columns
+        if df.empty:
+            return None
+        # rename/ensure columns expected by _normalize_df
+        cols_lower = [c.lower() for c in df.columns]
+        # Standard mapping check
+        expected = ["Date","Open","High","Low","Close","Adj Close","Volume"]
+        # If 'Adj Close' present keep Close as Close
+        if "adj close" in cols_lower and "close" in cols_lower:
+            # columns likely standard
+            pass
+        # Ensure numeric
+        for c in ["Open","High","Low","Close","Volume"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            else:
+                df[c] = np.nan
+        return df.reset_index(drop=True)
+    except Exception:
+        return None
+
+# -------------------------
+# get_best_ticker: try yfinance then yahoo csv
+# -------------------------
+def get_best_ticker(symbol, period="6mo", interval="1d"):
+    """
+    Try all candidate tickers for symbol and return (working_ticker, normalized_df) or (None,None).
+    """
+    candidates = resolve_ticker_candidates(symbol)
+    for t in candidates:
+        # 1) try yfinance
         df = _yf_download(t, period, interval)
         df = _normalize_df(df)
-        if df is not None and not df.empty:
+        if df is not None:
             return t, df
+        # 2) try yahoo csv fallback
+        df2 = _yahoo_csv_download(t, period, interval)
+        df2 = _normalize_df(df2)
+        if df2 is not None:
+            return t, df2
     return None, None
 
-
-# ==========================================================
-# MAIN STOCK FETCH FUNCTIONS
-# ==========================================================
+# -------------------------
+# Public fetch functions (used by frontend)
+# -------------------------
 def get_stock_data(symbol: str, period="6mo", interval="1d"):
-    """
-    Auto-resolves best working ticker from NSE/BSE.
-    """
-    ticker, df = get_best_ticker(symbol, period, interval)
+    _, df = get_best_ticker(symbol, period, interval)
     return df
-
 
 def get_intraday_data(symbol: str, interval="1m", period="1d"):
-    """
-    Intraday version.
-    """
-    ticker, df = get_best_ticker(symbol, period, interval)
+    _, df = get_best_ticker(symbol, period, interval)
     return df
 
-
-# ==========================================================
-# TODAY'S HIGH / LOW
-# ==========================================================
 def get_today_high_low(symbol: str):
-    ticker, df = get_best_ticker(symbol, "1d", "1m")
+    t, df = get_best_ticker(symbol, "1d", "1m")
     if df is None or df.empty:
         return None
-    df2 = df.dropna(subset=["Close"])
-    if df2.empty:
+    d = df.dropna(subset=["Close"])
+    if d.empty:
         return None
-    return {
-        "high": float(df2["High"].max()),
-        "low": float(df2["Low"].min()),
-        "timestamp": df2["Date"].iloc[-1]
-    }
+    return {"high": float(d["High"].max()), "low": float(d["Low"].min()), "timestamp": d["Date"].iloc[-1]}
 
-
-# ==========================================================
-# STOCK SUMMARY
-# ==========================================================
 @lru_cache(maxsize=128)
 def stock_summary(symbol: str, period="6mo", interval="1d"):
-    ticker, df = get_best_ticker(symbol, period, interval)
-    if df is None or df.empty:
+    t, df = get_best_ticker(symbol, period, interval)
+    if df is None:
         return None
     try:
         first = float(df["Close"].iloc[0])
         last = float(df["Close"].iloc[-1])
-        pct = (last-first)/(first+1e-9)*100
-        return {
-            "ticker": ticker,
-            "first_close": first,
-            "latest_close": last,
-            "pct_change": pct,
-            "recent": df.tail(30).to_dict("records")
-        }
-    except:
+        return {"ticker": t, "first_close": first, "latest_close": last, "pct_change": (last-first)/(first+1e-9)*100, "recent": df.tail(30).to_dict("records")}
+    except Exception:
         return None
 
-
-# ==========================================================
-# NEWS + SENTIMENT (unchanged)
-# ==========================================================
-def fetch_news_via_google_rss(query, max_items=15):
+# -------------------------
+# News & sentiment (unchanged)
+# -------------------------
+import feedparser
+def fetch_news_via_google_rss(query: str, max_items: int = 10):
     url = f"https://news.google.com/rss/search?q={requests.utils.quote(query)}&hl=en-IN&gl=IN&ceid=IN:en"
     feed = feedparser.parse(url)
-    out=[]
-    for e in feed.entries[:max_items]:
+    articles = []
+    for entry in feed.entries[:max_items]:
         try:
-            pub = datetime(*e.published_parsed[:6])
-        except:
-            pub = datetime.now()
-        out.append({"title": e.title, "link": e.link, "published": pub})
-    return out
+            pub = datetime(*entry.published_parsed[:6])
+        except Exception:
+            pub = datetime.utcnow()
+        articles.append({"title": entry.title, "link": entry.link, "published": pub})
+    return articles
 
 def analyze_headlines_sentiment(articles):
     if sentiment_analyzer is None:
-        return [{**a,"sentiment": None} for a in articles]
-    res=[]
+        return [{**a, "sentiment": None} for a in articles]
+    out = []
     for a in articles:
         try:
             s = sentiment_analyzer(a["title"][:512])[0]
-            res.append({**a,"sentiment":{"label": s["label"], "score": float(s["score"])}})
-        except:
-            res.append({**a,"sentiment": None})
-    return res
+            out.append({**a, "sentiment": {"label": s.get("label"), "score": float(s.get("score", 0.0))}})
+        except Exception:
+            out.append({**a, "sentiment": None})
+    return out
 
-
-# ==========================================================
-# GITHUB / ARXIV (unchanged)
-# ==========================================================
-def fetch_github_trending(lang=None):
-    url = f"https://github.com/trending/{lang}" if lang else "https://github.com/trending"
-    r = requests.get(url)
+# -------------------------
+# lightweight helpers for trending / arxiv (unchanged)
+# -------------------------
+from bs4 import BeautifulSoup
+def fetch_github_trending(language=None, since="daily"):
+    url = f"https://github.com/trending{f'/{language}' if language else ''}?since={since}"
+    r = requests.get(url, timeout=8)
     if r.status_code != 200:
         return []
     soup = BeautifulSoup(r.text, "lxml")
-    out=[]
-    for row in soup.select("article.Box-row")[:20]:
-        a = row.find("a")
-        if not a: continue
-        name = a.get("href","").strip("/")
-        desc_tag = row.find("p")
+    repos = []
+    for repo in soup.select("article.Box-row")[:20]:
+        title_tag = repo.find(["h1","h2"])
+        if not title_tag:
+            continue
+        link = title_tag.find("a").get("href","").strip("/")
+        desc_tag = repo.find("p")
         desc = desc_tag.get_text(strip=True) if desc_tag else ""
-        out.append({"name":name,"description":desc})
-    return out
+        repos.append({"name": link, "description": desc})
+    return repos
 
-def fetch_arxiv_papers(q, max_results=5):
+def fetch_arxiv_papers(query, max_results=5):
     base = "http://export.arxiv.org/api/query"
-    params = {"search_query": f"all:{q}", "start":0,"max_results":max_results}
-    r = requests.get(base, params=params)
-    if r.status_code !=200:
+    params = {"search_query": f"all:{query}", "start": 0, "max_results": max_results}
+    r = requests.get(base, params=params, timeout=8)
+    if r.status_code != 200:
         return []
-    soup = BeautifulSoup(r.text,"xml")
-    out=[]
-    for e in soup.find_all("entry")[:max_results]:
-        out.append({
-            "title": e.title.get_text(strip=True),
-            "summary": e.summary.get_text(strip=True),
-            "link": e.id.get_text(strip=True),
-        })
-    return out
+    soup = BeautifulSoup(r.text, features="xml")
+    papers=[]
+    for entry in soup.find_all("entry")[:max_results]:
+        papers.append({"title": entry.title.get_text(strip=True), "summary": entry.summary.get_text(strip=True), "link": entry.id.get_text(strip=True)})
+    return papers
