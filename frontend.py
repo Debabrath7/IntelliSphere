@@ -1,7 +1,7 @@
 # frontend.py
-# IntelliSphere - Frontend (dark mode, intraday auto-switch for 1d, improved sidebar)
-# Candlestick-only style as requested (cleaner)
-# Author: adapted for Debabrath
+# IntelliSphere - Frontend
+# Candlestick-only style
+# Author: Debabrath
 
 import streamlit as st
 import pandas as pd
